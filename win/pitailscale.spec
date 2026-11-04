@@ -12,11 +12,7 @@ a = Analysis(
         ('templates', 'templates'),  # Flask template folder (bundled, extract vào _MEIPASS lúc runtime)
         ('static', 'static'),
     ],
-    hiddenimports=[
-        # psutil cần mấy backend lúc introspect — PyInstaller đôi khi bỏ sót
-        'psutil',
-        'psutil._psutil_windows',
-    ],
+    hiddenimports=[],  # PyInstaller tự detect — explicit psutil._psutil_windows gây lỗi khi version mismatch
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -39,7 +35,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,          # nén UPX nếu runner có upx, giảm size ~30%
+    upx=False,         # windows-latest runner không có UPX pre-installed → tắt để không fail
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,      # console mode để user thấy log + install messages

@@ -30,15 +30,25 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller==6.11.1
+          pip install pyinstaller==6.11.0
+          pip list
 
-      - name: Build onefile .exe
-        run: pyinstaller --clean --noconfirm pitailscale.spec
+      - name: Build onefile .exe (verbose)
+        run: pyinstaller --clean --noconfirm --log-level=INFO pitailscale.spec
 
       - name: Sanity check binary
         run: |
           dir dist
           dist\pitailscale.exe --help
+
+      - name: Dump build log on failure
+        if: failure()
+        run: |
+          echo "=== build\pitailscale\warn-pitailscale.txt ==="
+          type build\pitailscale\warn-pitailscale.txt 2>$null
+          echo "=== build\pitailscale\xref-pitailscale.html head ==="
+          Get-Content build\pitailscale\xref-pitailscale.html -ErrorAction SilentlyContinue | Select-Object -First 50
+        shell: pwsh
 
       - name: Upload artifact (per-commit)
         uses: actions/upload-artifact@v4
