@@ -72,31 +72,64 @@ def _find_executable(candidates: list) -> str:
     return ""
 
 
-def detect_local_subnet() -> str:
-    """Return the primary LAN subnet in CIDR via psutil (OS-agnostic)."""
+# Interface name chứa bất kỳ substring nào bên dưới → bỏ qua (không phải LAN vật lý)
+_EXCLUDE_IFACE_SUBSTR = (
+    "tailscale", "loopback", "pseudo", "vmware", "virtualbox", "docker", "wsl",
+    "hyper-v", "vethernet", "bluetooth", "wintun", "tap-", "tap9", "openvpn",
+    "zerotier", "wireguard", "wg", "ppp", "isatap", "teredo",
+)
+
+
+def _is_tailscale_cgnat(ip: str) -> bool:
+    """100.64.0.0/10 = CGNAT, Tailscale dùng khoảng này."""
     try:
+        return ipaddress.IPv4Address(ip) in ipaddress.IPv4Network("100.64.0.0/10")
+    except Exception:
+        return False
+
+
+def detect_local_subnet() -> str:
+    """Return a /24 CIDR around the primary physical LAN IP.
+
+    Luôn clamp về /24 để scan không dính sang vùng rộng (máy khách có thể có
+    netmask /16, hoặc Tailscale advertise subnet routes → nmap scan /24 vẫn
+    chỉ loanh quanh IP của máy mình, không chạm peer bên kia Tailscale).
+    """
+    candidates = []
+    try:
+        stats = psutil.net_if_stats()
         for name, addrs in psutil.net_if_addrs().items():
             low = name.lower()
-            if "tailscale" in low or "loopback" in low or "vmware" in low or "virtualbox" in low:
+            if any(ex in low for ex in _EXCLUDE_IFACE_SUBSTR):
                 continue
-            # Loại interface không up
-            stats = psutil.net_if_stats().get(name)
-            if stats and not stats.isup:
+            st = stats.get(name)
+            if st and not st.isup:
                 continue
             for a in addrs:
                 if a.family != socket.AF_INET:
                     continue
-                if not a.address or a.address.startswith("127.") or a.address.startswith("169.254."):
-                    continue
-                if not a.netmask:
+                ip = a.address or ""
+                if (not ip
+                        or ip.startswith("127.")
+                        or ip.startswith("169.254.")
+                        or _is_tailscale_cgnat(ip)):
                     continue
                 try:
-                    net = ipaddress.ip_network(f"{a.address}/{a.netmask}", strict=False)
-                    return str(net)
+                    addr = ipaddress.IPv4Address(ip)
+                    # Chỉ nhận RFC1918 — tránh chọn public IP làm subnet scan
+                    if not addr.is_private:
+                        continue
                 except Exception:
                     continue
+                candidates.append((name, ip))
     except Exception:
         pass
+
+    if candidates:
+        # Interface đầu tiên matching — Windows thường list Ethernet/Wi-Fi trước VPN
+        ip = candidates[0][1]
+        octets = ip.split(".")
+        return f"{octets[0]}.{octets[1]}.{octets[2]}.0/24"
     return "192.168.1.0/24"
 
 
@@ -296,8 +329,45 @@ def detect_existing_forwards(tailscale_ip: str) -> list:
     return results
 
 
+def _validate_subnet(subnet: str) -> str:
+    """Chặn subnet Tailscale CGNAT, chặn prefix quá rộng (>/22 nghĩa là >1024 IP)."""
+    try:
+        net = ipaddress.ip_network(subnet, strict=False)
+    except Exception:
+        raise ScanError(f"Subnet không hợp lệ: {subnet}")
+    if net.version != 4:
+        raise ScanError("Chỉ hỗ trợ IPv4")
+    try:
+        ts_net = ipaddress.IPv4Network("100.64.0.0/10")
+        if net.subnet_of(ts_net) or ts_net.subnet_of(net):
+            raise ScanError(
+                f"Subnet {subnet} trùng khoảng Tailscale (100.64.0.0/10) — "
+                "sẽ scan sang máy khác trong tailnet. Hãy nhập subnet LAN "
+                "vật lý của máy này (ví dụ 192.168.1.0/24).")
+    except ScanError:
+        raise
+    except Exception:
+        pass
+    if net.prefixlen < 22:  # >/22 nghĩa là <22 prefix bits → >1024 host
+        raise ScanError(
+            f"Subnet {subnet} quá rộng ({net.num_addresses} IP). "
+            "Giới hạn /22 trở lên (tối đa ~1024 IP) để scan nhanh và không "
+            "quét sang mạng khác. Nhập lại, ví dụ 192.168.1.0/24.")
+    return str(net)
+
+
 def scan(subnet: str = "") -> dict:
     subnet = subnet or detect_local_subnet()
+    try:
+        subnet = _validate_subnet(subnet)
+    except ScanError as e:
+        return {
+            "subnet": subnet,
+            "tailscale_ip": get_tailscale_ip(),
+            "total_hosts": 0,
+            "cameras": [], "others": [],
+            "error": str(e),
+        }
     try:
         hosts = nmap_scan(subnet)
     except ScanError as e:
