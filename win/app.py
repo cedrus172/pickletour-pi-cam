@@ -165,21 +165,99 @@ def _check_nmap() -> bool:
         return False
 
 
+def _find_winget() -> str:
+    """winget hay nằm trong WindowsApps nhưng không luôn có trong PATH của
+    console/SYSTEM. Tìm trực tiếp file winget.exe."""
+    # 1. PATH
+    for name in ("winget.exe", "winget"):
+        try:
+            r = subprocess.run([name, "--version"], capture_output=True, timeout=5)
+            if r.returncode == 0:
+                return name
+        except Exception:
+            pass
+    # 2. WindowsApps (per-user)
+    local = os.environ.get("LOCALAPPDATA", "")
+    if local:
+        import glob
+        pattern = os.path.join(local, "Microsoft", "WindowsApps", "winget.exe")
+        if os.path.exists(pattern):
+            return pattern
+        # Package cache dạng Microsoft.DesktopAppInstaller_...
+        for p in glob.glob(os.path.join(
+            local, "Microsoft", "WindowsApps",
+            "Microsoft.DesktopAppInstaller_*", "winget.exe")):
+            return p
+    # 3. Program Files (machine-wide, hiếm)
+    for p in (
+        r"C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_*\winget.exe",
+    ):
+        import glob
+        for m in glob.glob(p):
+            return m
+    return ""
+
+
 def _install_nmap_winget():
-    print("» Nmap chưa có → thử cài qua winget...")
+    print("» Nmap chưa có → thử cài qua winget (PowerShell)...")
+    winget = _find_winget()
+    if winget:
+        try:
+            subprocess.run(
+                [winget, "install", "-e", "--id", "Insecure.Nmap",
+                 "--accept-source-agreements", "--accept-package-agreements",
+                 "--silent"],
+                timeout=300,
+            )
+            if _check_nmap():
+                print("✓ Nmap installed qua winget")
+                return True
+        except Exception as e:
+            print(f"! winget fail: {e}")
+    else:
+        print("! Không thấy winget.exe trong PATH hoặc WindowsApps.")
+
+    # Fallback: gọi winget qua PowerShell (PATH của PS user khác cmd)
+    print("» Thử lại qua PowerShell...")
+    ps_cmd = (
+        "winget install -e --id Insecure.Nmap "
+        "--accept-source-agreements --accept-package-agreements --silent"
+    )
     try:
         subprocess.run(
-            ["winget", "install", "-e", "--id", "Insecure.Nmap",
-             "--accept-source-agreements", "--accept-package-agreements"],
-            timeout=180,
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-Command", ps_cmd],
+            timeout=300,
         )
         if _check_nmap():
-            print("✓ Nmap installed")
+            print("✓ Nmap installed qua PowerShell+winget")
             return True
     except Exception as e:
-        print(f"! winget fail: {e}")
-    print("! Vẫn chưa có nmap. Tải thủ công: https://nmap.org/download.html")
-    print("  (scan IP sẽ không chạy đến khi cài xong — các chức năng khác vẫn OK)")
+        print(f"! PowerShell+winget fail: {e}")
+
+    # Fallback cuối: tải installer trực tiếp từ nmap.org
+    print("» Fallback: tải nmap installer trực tiếp...")
+    try:
+        import tempfile
+        import urllib.request
+        url = "https://nmap.org/dist/nmap-7.95-setup.exe"
+        tmp = os.path.join(tempfile.gettempdir(), "nmap-setup.exe")
+        print(f"  downloading {url} ...")
+        urllib.request.urlretrieve(url, tmp)
+        print(f"  running {tmp} (silent /S)...")
+        r = subprocess.run([tmp, "/S"], timeout=300)
+        if _check_nmap():
+            print("✓ Nmap installed qua installer")
+            return True
+        print(f"! Installer rc={r.returncode}, vẫn chưa thấy nmap")
+    except Exception as e:
+        print(f"! Download/install fail: {e}")
+
+    print()
+    print("! KHÔNG tự cài được nmap. Hai cách thủ công:")
+    print("  1. Mở PowerShell admin → winget install -e --id Insecure.Nmap")
+    print("  2. Tải thủ công: https://nmap.org/download.html")
+    print("  (các chức năng khác của PiTailscale vẫn chạy bình thường)")
     return False
 
 
