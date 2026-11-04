@@ -1,0 +1,61 @@
+name: Build Windows .exe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'win/**'
+      - '.github/workflows/build-win.yml'
+  workflow_dispatch: {}   # Chạy tay từ tab Actions trên GitHub
+
+permissions:
+  contents: write   # cần để tạo release + upload asset
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: win
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: win/requirements.txt
+
+      - name: Install deps + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.11.1
+
+      - name: Build onefile .exe
+        run: pyinstaller --clean --noconfirm pitailscale.spec
+
+      - name: Sanity check binary
+        run: |
+          dir dist
+          dist\pitailscale.exe --help
+
+      - name: Upload artifact (per-commit)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pitailscale-exe
+          path: win/dist/pitailscale.exe
+          retention-days: 30
+
+      - name: Publish Release (tag build-<shortsha>)
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }} (${{ github.sha }})
+          body: |
+            Auto-build từ commit ${{ github.sha }}.
+            Chạy `pitailscale.exe --install` (as Administrator) để đăng ký
+            Task Scheduler + mở firewall + start server.
+          files: win/dist/pitailscale.exe
+          fail_on_unmatched_files: true

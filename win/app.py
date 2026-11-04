@@ -1,8 +1,10 @@
-"""PiTailscale — web UI to discover LAN cameras/DVRs and expose them via Tailscale."""
+"""PiTailscale — web UI (Windows .exe entry point)."""
 import argparse
 import atexit
 import os
 import socket
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -14,8 +16,11 @@ import scanner
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-BASE_DIR = Path(__file__).resolve().parent
-app = Flask(__name__, template_folder=str(BASE_DIR / "templates"),
+# Khi đóng gói bằng PyInstaller (onefile), templates/static được bundle và
+# giải nén vào sys._MEIPASS tạm thời; dev mode thì vẫn cạnh app.py.
+BASE_DIR = Path(getattr(sys, "_MEIPASS", str(Path(__file__).resolve().parent)))
+app = Flask(__name__,
+            template_folder=str(BASE_DIR / "templates"),
             static_folder=str(BASE_DIR / "static"))
 
 _last_scan: dict = {}
@@ -79,8 +84,7 @@ def api_forwards_list():
 @app.post("/api/forwards")
 def api_forwards_create():
     data = request.get_json(silent=True) or {}
-    required = ["target_ip", "target_port"]
-    for k in required:
+    for k in ("target_ip", "target_port"):
         if not data.get(k):
             return jsonify({"error": f"{k} required"}), 400
     ts_ip = scanner.get_tailscale_ip()
@@ -102,13 +106,11 @@ def api_forwards_create():
 
 @app.delete("/api/forwards/<int:fid>")
 def api_forwards_delete(fid):
-    ok = forwarder.delete_forward(fid)
-    return jsonify({"ok": ok})
+    return jsonify({"ok": forwarder.delete_forward(fid)})
 
 
 @app.get("/api/system-forwards")
 def api_system_forwards():
-    """All TCP/UDP ports listening on tailscale/wildcard IPs (incl. external socat/nginx)."""
     ts_ip = scanner.get_tailscale_ip()
     system = scanner.detect_existing_forwards(ts_ip)
     managed = {(f["protocol"], f["listen_port"]) for f in forwarder.list_forwards()}
@@ -117,21 +119,110 @@ def api_system_forwards():
     return jsonify({"tailscale_ip": ts_ip, "forwards": system})
 
 
+atexit.register(forwarder.shutdown_all)
+
+
+# =============================================================================
+# Install / uninstall — chạy trực tiếp từ .exe, không cần script ngoài
+# =============================================================================
+
+TASK_NAME = "PiTailscale"
+FW_RULE = f"PiTailscale {os.environ.get('PT_PORT', '9999')}"
+
+
+def _is_admin() -> bool:
+    try:
+        import ctypes
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return os.name != "nt"  # dev trên Mac/Linux skip check
+
+
+def _exe_path() -> str:
+    """Đường dẫn chính xác tới .exe/script để Task Scheduler dùng."""
+    if getattr(sys, "frozen", False):
+        return sys.executable  # PyInstaller onefile → full path tới .exe
+    return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+
+
+def cmd_install(port: int):
+    if os.name != "nt":
+        print("install chỉ chạy trên Windows"); sys.exit(1)
+    if not _is_admin():
+        print("✗ Cần chạy as Administrator để đăng ký Task Scheduler.")
+        print("  Chuột phải .exe → Run as administrator, rồi chạy lại: pitailscale.exe --install")
+        sys.exit(1)
+
+    exe = _exe_path()
+    print(f"» Đăng ký task '{TASK_NAME}' chạy khi boot...")
+    # Xoá task cũ nếu có
+    subprocess.run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"],
+                   capture_output=True)
+    r = subprocess.run([
+        "schtasks", "/Create", "/TN", TASK_NAME,
+        "/TR", exe, "/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST", "/F",
+    ], capture_output=True, text=True)
+    if r.returncode != 0:
+        print("✗ schtasks fail:", r.stderr); sys.exit(1)
+    print(f"✓ Task created")
+
+    print(f"» Mở firewall TCP {port}...")
+    subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule",
+                    f"name={FW_RULE}"], capture_output=True)
+    subprocess.run(["netsh", "advfirewall", "firewall", "add", "rule",
+                    f"name={FW_RULE}", "dir=in", "action=allow",
+                    "protocol=TCP", f"localport={port}"], capture_output=True)
+    print(f"✓ Firewall rule added")
+
+    print(f"» Start task luôn...")
+    subprocess.run(["schtasks", "/Run", "/TN", TASK_NAME], capture_output=True)
+    print(f"✓ Đã start")
+    print()
+    print(f"  UI local      : http://localhost:{port}")
+    print(f"  UI Tailscale  : http://<tailscale-ip>:{port}")
+    print(f"  Stop          : schtasks /End /TN {TASK_NAME}")
+    print(f"  Restart       : schtasks /End /TN {TASK_NAME} && schtasks /Run /TN {TASK_NAME}")
+    print(f"  Uninstall     : pitailscale.exe --uninstall")
+
+
+def cmd_uninstall():
+    if os.name != "nt":
+        print("uninstall chỉ chạy trên Windows"); sys.exit(1)
+    if not _is_admin():
+        print("✗ Cần chạy as Administrator"); sys.exit(1)
+    print("» Stop task...")
+    subprocess.run(["schtasks", "/End", "/TN", TASK_NAME], capture_output=True)
+    subprocess.run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"],
+                   capture_output=True)
+    subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule",
+                    f"name={FW_RULE}"], capture_output=True)
+    print("✓ Đã gỡ task + firewall rule")
+    print("  (Data ở %USERPROFILE%\\PiTailscale\\data không bị xoá)")
+
+
 def _startup():
     forwarder.restore_all(scanner.get_tailscale_ip())
 
 
-atexit.register(forwarder.shutdown_all)
-
-
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(prog="pitailscale",
+                                 description="PiTailscale — camera gateway for Windows")
     ap.add_argument("--host", default=os.environ.get("PT_HOST", "0.0.0.0"))
     ap.add_argument("--port", type=int, default=int(os.environ.get("PT_PORT", "9999")))
-    ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--install", action="store_true",
+                    help="Đăng ký Task Scheduler + mở firewall + start (cần admin)")
+    ap.add_argument("--uninstall", action="store_true",
+                    help="Gỡ task + firewall rule (cần admin)")
     args = ap.parse_args()
+
+    if args.install:
+        cmd_install(args.port); return
+    if args.uninstall:
+        cmd_uninstall(); return
+
     _startup()
-    app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
+    print(f"PiTailscale running on http://{args.host}:{args.port}")
+    app.run(host=args.host, port=args.port, threaded=True)
 
 
 if __name__ == "__main__":
