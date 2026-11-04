@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime data — chứa SQLite DB với credential NVR, KHÔNG push lên repo
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Media runtime
+streams/
+clips/
+thumbs/
+
+# Logs
+*.log
+nohup.out
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Secrets
+*.env
+.env.*
+credentials.json
+*.pem
+*.key
+
+# Build artifacts
+*.zip
+dist/
+build/

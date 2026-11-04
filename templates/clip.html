@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0a1414">
+<title>PickClip — Cắt highlight pickleball</title>
+<link rel="stylesheet" href="/static/clip.css?v={{ ver }}">
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+</head>
+<body>
+
+<div id="app">
+
+<!-- ========== SCREEN: HOME ========== -->
+<section class="screen" data-screen="home">
+  <div class="hero">
+    <div class="hero-head">
+      <div class="brand">
+        <span class="ball"></span>
+        <h1 id="brand-title">PickClip</h1>
+      </div>
+      <button class="icon-btn" title="Cài đặt" data-nav="settings">⚙</button>
+    </div>
+    <p class="tagline" id="brand-tagline">Cắt highlight cam sân pickleball nhanh chóng</p>
+    <button class="btn-cta" id="btn-choose-cam">
+      <span class="cta-icon">📷</span>
+      <span>Chọn camera</span>
+      <span class="chev">›</span>
+    </button>
+  </div>
+
+  <div class="section-head">
+    <h3>Camera sân</h3>
+    <small>Xem tất cả ›</small>
+  </div>
+  <div id="cam-grid" class="cam-grid"></div>
+</section>
+
+<!-- ========== SCREEN: VIDEOS (clips còn tải được) ========== -->
+<section class="screen" data-screen="videos" style="display:none">
+  <div class="topbar">
+    <h2>Video đã cắt</h2>
+    <button class="icon-btn" title="Refresh" id="btn-refresh-videos">↻</button>
+  </div>
+  <div class="hint-row">
+    <small>Clip tự xoá sau <b id="ret-h">3 giờ</b>. Tải về máy nếu muốn giữ lâu.</small>
+  </div>
+  <div id="videos-grid" class="cam-grid"></div>
+</section>
+
+<!-- ========== SCREEN: HISTORY ========== -->
+<section class="screen" data-screen="history" style="display:none">
+  <div class="topbar">
+    <h2>Lịch sử cắt</h2>
+    <button class="icon-btn" title="Xoá lịch sử" id="btn-clear-history">🗑</button>
+  </div>
+  <div id="history-list" class="history-list"></div>
+</section>
+
+<!-- ========== SCREEN: SETTINGS ========== -->
+<section class="screen" data-screen="settings" style="display:none">
+  <div class="topbar">
+    <button class="icon-btn" data-nav="home">‹</button>
+    <h2>Cài đặt</h2>
+    <span style="width:40px"></span>
+  </div>
+  <div class="info-card" style="padding:14px">
+    <div class="info-row"><span>Số sân</span><b id="set-cam-count">—</b></div>
+    <div class="info-row"><span>Clip giữ lại</span><b id="set-ret">—</b></div>
+    <div class="info-row"><span>Lịch sử lưu trữ</span><b id="set-hist">—</b></div>
+  </div>
+  <button class="btn-cta ghost" id="set-clear">
+    <span class="cta-icon">🗑</span><span>Xoá lịch sử trên máy này</span><span class="chev">›</span>
+  </button>
+</section>
+
+<!-- ========== SCREEN: CAMERA ========== -->
+<section class="screen" data-screen="cam" style="display:none">
+  <div class="topbar">
+    <button class="icon-btn" data-nav="home">‹</button>
+    <h2 id="cam-title">Sân</h2>
+    <button class="icon-btn">⚙</button>
+  </div>
+
+  <div class="video-card">
+    <div class="live-badge"><span class="live-dot"></span> Trực tiếp</div>
+    <video id="cam-video" controls playsinline muted></video>
+    <div class="video-time" id="cam-time">—</div>
+  </div>
+
+  <div class="timeline">
+    <div class="tl-head">
+      <small>18:30</small><small>19:00</small><small>19:30</small><small>20:00</small>
+    </div>
+    <div class="tl-bar"><div class="tl-cursor"></div></div>
+  </div>
+
+  <h3 class="sh">Cắt nhanh highlight</h3>
+  <div class="quick-grid">
+    <button class="quick-chip active" data-min="5"><b>5</b><small>phút</small></button>
+    <button class="quick-chip" data-min="10"><b>10</b><small>phút</small></button>
+    <button class="quick-chip" data-min="15"><b>15</b><small>phút</small></button>
+    <button class="quick-chip" data-min="30"><b>30</b><small>phút</small></button>
+  </div>
+
+  <button class="btn-cta primary" id="btn-quick-cut">
+    <span class="cta-icon">✂</span>
+    <span id="quick-label">Cắt highlight (5 phút)</span>
+    <span class="chev">›</span>
+  </button>
+
+  <button class="btn-cta ghost" data-nav="custom">
+    <span class="cta-icon">📅</span>
+    <span>Tùy chỉnh thời gian</span>
+    <span class="chev">›</span>
+  </button>
+</section>
+
+<!-- ========== SCREEN: CUSTOM TIME ========== -->
+<section class="screen" data-screen="custom" style="display:none">
+  <div class="topbar">
+    <button class="icon-btn" data-nav="cam">‹</button>
+    <h2>Tùy chỉnh thời gian</h2>
+    <span style="width:40px"></span>
+  </div>
+
+  <div class="field-card">
+    <label>Chọn thời gian bắt đầu</label>
+    <div class="dt-input"><span class="dt-ico">📅</span><input id="dt-start" type="datetime-local" step="1"></div>
+  </div>
+  <div class="field-card">
+    <label>Chọn thời gian kết thúc</label>
+    <div class="dt-input"><span class="dt-ico">📅</span><input id="dt-end" type="datetime-local" step="1"></div>
+  </div>
+
+  <div class="quick-grid">
+    <button class="quick-chip" data-preset="5"><b>5</b><small>phút</small></button>
+    <button class="quick-chip" data-preset="10"><b>10</b><small>phút</small></button>
+    <button class="quick-chip" data-preset="15"><b>15</b><small>phút</small></button>
+    <button class="quick-chip" data-preset="30"><b>30</b><small>phút</small></button>
+  </div>
+
+  <button class="btn-cta primary" id="btn-custom-preview">
+    <span class="cta-icon">✂</span><span>Xem trước đoạn cắt</span><span class="chev">›</span>
+  </button>
+
+  <div class="info-note">
+    <span>ⓘ</span>
+    <div>
+      Thời lượng tối đa 30 phút.<br>
+      Vui lòng chọn thời gian trong khoảng dữ liệu có sẵn.
+    </div>
+  </div>
+</section>
+
+<!-- ========== SCREEN: PREVIEW/EXPORT ========== -->
+<section class="screen" data-screen="preview" style="display:none">
+  <div class="topbar">
+    <button class="icon-btn" data-nav="cam">‹</button>
+    <h2>Xem trước &amp; chỉnh sửa</h2>
+    <span style="width:40px"></span>
+  </div>
+
+  <div class="video-card">
+    <video id="prev-video" controls playsinline></video>
+  </div>
+
+  <div class="prev-info">
+    <div>
+      <small>Thời gian cắt</small>
+      <div id="prev-range" class="mono">—</div>
+    </div>
+  </div>
+
+  <h3 class="sh">Thông tin video</h3>
+  <div class="info-card">
+    <div class="info-row"><span>Sân</span><b id="info-cam">—</b></div>
+    <div class="info-row"><span>Thời điểm</span><b id="info-time">—</b></div>
+    <div class="info-row"><span>Thời lượng</span><b id="info-dur">—</b></div>
+  </div>
+
+  <h3 class="sh">Tên file</h3>
+  <div class="field-card">
+    <div class="dt-input"><input id="info-fname" value=""><span class="dt-ico">.mp4</span></div>
+  </div>
+
+  <button class="btn-cta primary" id="btn-export">
+    <span class="cta-icon">⬇</span><span>Bắt đầu xuất</span><span class="chev">›</span>
+  </button>
+</section>
+
+<!-- ========== SCREEN: EXPORTING ========== -->
+<section class="screen" data-screen="exporting" style="display:none">
+  <div class="success-wrap">
+    <div class="spinner"></div>
+    <h2>Đang xuất video...</h2>
+    <div class="progress-wrap">
+      <div class="progress-pct" id="prog-pct">0%</div>
+      <div class="progress-bar"><div id="prog-fill" class="progress-fill"></div></div>
+      <div class="progress-meta" id="prog-meta">Đang khởi động ffmpeg...</div>
+    </div>
+    <small id="rtsp-hint" style="color:var(--warn);display:none;margin-top:16px">
+      ⚠ Fallback RTSP · tốc độ ~1x realtime (clip N phút mất ~N phút)
+    </small>
+  </div>
+</section>
+
+<!-- ========== SCREEN: SUCCESS ========== -->
+<section class="screen" data-screen="success" style="display:none">
+  <div class="success-wrap">
+    <div class="check">✓</div>
+    <h2>Xuất video thành công!</h2>
+    <p class="success-sub"><span id="succ-dur">—</span> &nbsp; · &nbsp; <span id="succ-size">—</span></p>
+    <p id="retention-note" class="success-sub" style="color:var(--accent);font-size:12px">⏱</p>
+
+    <div class="video-card compact">
+      <video id="succ-video" controls playsinline></video>
+    </div>
+
+    <a id="btn-download" class="btn-cta primary" download>
+      <span class="cta-icon">⬇</span><span>Tải về máy</span>
+    </a>
+
+    <h3 class="sh">Chia sẻ nhanh</h3>
+    <div class="share-row">
+      <button class="share-btn" data-share="zalo"><span>💬</span><small>Zalo</small></button>
+      <button class="share-btn" data-share="fb"><span>📘</span><small>Facebook</small></button>
+      <button class="share-btn" data-share="ig"><span>📷</span><small>Instagram</small></button>
+      <button class="share-btn" data-share="tt"><span>🎵</span><small>TikTok</small></button>
+      <button class="share-btn" data-share="copy"><span>🔗</span><small>Copy link</small></button>
+    </div>
+
+    <button class="btn-cta ghost" data-nav="cam">
+      <span class="cta-icon">✂</span><span>Cắt đoạn khác</span><span class="chev">›</span>
+    </button>
+  </div>
+</section>
+
+<!-- ========== SCREEN: ERROR ========== -->
+<section class="screen" data-screen="error" style="display:none">
+  <div class="success-wrap">
+    <div class="check" style="background:#f87171;color:#000">!</div>
+    <h2>Có lỗi khi xuất</h2>
+    <p class="success-sub mono" id="err-msg">—</p>
+    <button class="btn-cta ghost" data-nav="cam"><span class="cta-icon">↩</span><span>Quay lại</span></button>
+  </div>
+</section>
+
+</div>
+
+<footer class="brand-footer">
+  <small id="brand-footer-text">
+    <a id="brand-footer-link" href="https://pickletour.vn" target="_blank">
+      Công cụ được phát triển bởi Pickletour.vn
+    </a>
+  </small>
+</footer>
+
+<nav class="tabbar" id="main-tabs">
+  <button class="tab active" data-nav="home"><span>🏠</span><small>Trang chủ</small></button>
+  <button class="tab" data-nav="videos"><span>▶</span><small>Video</small></button>
+  <button class="tab" data-nav="history"><span>🕒</span><small>Lịch sử</small></button>
+  <button class="tab" data-nav="settings"><span>⚙</span><small>Cài đặt</small></button>
+</nav>
+
+<script src="/static/clip.js?v={{ ver }}"></script>
+</body>
+</html>

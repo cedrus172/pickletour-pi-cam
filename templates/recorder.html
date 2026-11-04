@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PiTailscale Recorder — Camera Playback & Clip</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/recorder.css">
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="dot"></span>
+    <h1>PiTailscale Recorder</h1>
+    <span class="sub">Dahua NVR live + playback + clip</span>
+  </div>
+  <div id="hdr-info" class="net-info">...</div>
+</header>
+
+<main class="rec-layout">
+  <aside class="side">
+    <section class="card">
+      <h2>NVRs</h2>
+      <div id="nvr-list"></div>
+      <button id="btn-add-nvr" class="btn primary" style="width:100%;margin-top:10px">+ Add NVR</button>
+    </section>
+  </aside>
+
+  <section class="main">
+    <section class="card">
+      <h2>⚙ Branding (PickClip SPA)</h2>
+      <small style="color:var(--muted)">Chữ hiển thị ở trang khách <a href="/clip" target="_blank" style="color:var(--accent)">:9996</a></small>
+      <div style="display:grid;gap:10px;margin-top:12px">
+        <label>Tên app: <input id="brand_title" style="flex:1"></label>
+        <label>Tagline (câu phụ): <input id="brand_tagline" style="flex:1"></label>
+        <label>Footer: <input id="brand_footer" style="flex:1"></label>
+        <label>Footer URL: <input id="brand_footer_url" style="flex:1"></label>
+        <div class="row right">
+          <button id="btn-save-brand" class="btn primary">Lưu branding</button>
+          <small id="brand-status" class="status"></small>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Stream · <span id="cur-nvr">chọn NVR</span></h2>
+      <div class="row">
+        <label>Channel:
+          <input id="ch" type="number" min="1" max="128" value="1" style="width:70px">
+        </label>
+        <label>Mode:
+          <select id="mode">
+            <option value="live">Live</option>
+            <option value="playback">Playback</option>
+          </select>
+        </label>
+        <label>Subtype:
+          <select id="subtype">
+            <option value="0">Main (HD)</option>
+            <option value="1">Sub (nhẹ)</option>
+          </select>
+        </label>
+      </div>
+      <div class="row playback-only" style="display:none">
+        <label>Từ: <input id="start" type="datetime-local" step="1"></label>
+        <label>Đến: <input id="end" type="datetime-local" step="1"></label>
+      </div>
+      <div class="row">
+        <button id="btn-play" class="btn primary">▶ Play</button>
+        <button id="btn-stop" class="btn">⏹ Stop</button>
+        <button id="btn-clip" class="btn">✂ Clip &amp; Download</button>
+        <label class="live-only">Clip length (s): <input id="clip-dur" type="number" value="30" style="width:70px"></label>
+        <span id="stream-status" class="status"></span>
+      </div>
+      <div class="video-wrap">
+        <video id="video" controls playsinline muted></video>
+      </div>
+    </section>
+
+    <section class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h2 style="margin:0">Channels (sân) đã đặt tên</h2>
+        <button id="btn-add-channel" class="btn primary small">+ Thêm channel</button>
+      </div>
+      <small style="color:var(--muted)">Mỗi channel = 1 sân với tên hiển thị cho khách ở trang <a href="/clip" target="_blank" style="color:var(--accent)">/clip</a></small>
+      <table id="ch-table" style="margin-top:12px">
+        <thead><tr>
+          <th>Tên hiển thị</th><th>NVR</th><th>Ch</th><th>Sub</th><th>Mô tả</th><th></th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Clips</h2>
+      <div class="row">
+        <button id="btn-refresh-clips" class="btn">Refresh</button>
+      </div>
+      <table id="clip-table">
+        <thead><tr>
+          <th>Status</th><th>NVR</th><th>Ch</th><th>Mode</th>
+          <th>Name</th><th>Size</th><th>Thời điểm</th><th></th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </section>
+</main>
+
+<div id="nvr-modal" class="modal hidden">
+  <div class="modal-body">
+    <h3 id="n-title">Thêm NVR</h3>
+    <label>Tên: <input id="n-name" placeholder="Dahua phòng khách"></label>
+    <label>Host: <input id="n-host" placeholder="192.168.1.246"></label>
+    <label>RTSP port: <input id="n-port" type="number" value="554"></label>
+    <label>User: <input id="n-user" value="admin"></label>
+    <label>Password: <input id="n-pass" type="password" placeholder=""></label>
+    <small id="n-pass-hint" style="display:none;color:var(--muted);font-size:11px">
+      Để trống nếu giữ nguyên password cũ
+    </small>
+    <label>Số channel: <input id="n-ch" type="number" value="16"></label>
+    <hr style="border:none;border-top:1px solid var(--border);margin:12px 0">
+    <label>Watermark text khi tải clip (để trống = tắt):
+      <input id="n-wm" placeholder="VD: qtrung.pickletour.vn · Sân {ch} · {datetime}">
+    </label>
+    <small style="color:var(--muted);font-size:11px;display:block;margin-top:4px">
+      Placeholder: <code>{ch}</code> số channel · <code>{nvr}</code> tên NVR ·
+      <code>{date}</code> · <code>{time}</code> · <code>{datetime}</code>.
+      Bật watermark sẽ re-encode clip (chậm ~2-3× nhưng text nằm vĩnh viễn trong file).
+    </small>
+    <label>Vị trí watermark:
+      <select id="n-wm-pos">
+        <option value="bl" selected>Góc trái dưới</option>
+        <option value="br">Góc phải dưới</option>
+        <option value="tl">Góc trái trên</option>
+        <option value="tr">Góc phải trên</option>
+      </select>
+    </label>
+    <label>Cỡ chữ:
+      <select id="n-wm-size">
+        <option value="60">Rất nhỏ (~18px @1080p)</option>
+        <option value="50">Nhỏ (~22px)</option>
+        <option value="40" selected>Vừa (~27px)</option>
+        <option value="30">To (~36px)</option>
+        <option value="22">Rất to (~49px)</option>
+      </select>
+    </label>
+    <label style="display:flex;align-items:center;gap:8px">
+      <input type="checkbox" id="n-wm-scroll">
+      Chữ chạy ngang (marquee, phải → trái)
+    </label>
+    <small style="color:var(--muted);font-size:11px;display:block;margin-top:4px">
+      Khi bật "chữ chạy": vị trí trái/phải bị bỏ qua, chỉ chọn trên/dưới. Tốc độ 120px/s.
+    </small>
+    <label>Nguồn clip (playback):
+      <select id="n-source">
+        <option value="rtsp" selected>RTSP realtime (chuẩn, 1× realtime)</option>
+        <option value="fastload">Fastload .dav (nhanh ~2×, lấy thẳng từ ổ cứng NVR)</option>
+      </select>
+    </label>
+    <small style="color:var(--muted);font-size:11px;display:block;margin-top:4px">
+      Fastload chỉ áp dụng khi khách clip theo khoảng thời gian (playback), không áp dụng cho Live.
+      Nếu NVR không hỗ trợ loadfile.cgi, hệ thống tự fallback về RTSP.
+    </small>
+    <label>Encoder:
+      <select id="n-encoder">
+        <option value="libx264" selected>libx264 CPU (chất lượng tốt, dùng khi có watermark)</option>
+        <option value="h264_v4l2m2m">h264_v4l2m2m HW (nhanh 3-5×, cần firmware Pi hỗ trợ)</option>
+        <option value="copy">copy (nhanh nhất, KHÔNG hoạt động nếu có watermark)</option>
+      </select>
+    </label>
+    <small style="color:var(--muted);font-size:11px;display:block;margin-top:4px">
+      • <b>libx264</b>: ổn định, dùng cho trường hợp có watermark.<br>
+      • <b>h264_v4l2m2m</b>: HW encode trên Pi, nhanh 3-5× nhưng Pi 4 với kernel 6.6+ có thể fail;
+        nếu fail hệ thống tự fallback về libx264 (nhớ xem log để biết).<br>
+      • <b>copy</b>: KHÔNG re-encode, nhanh nhất (vài giây). Chỉ chọn khi <u>đã xoá text watermark ở ô trên</u>.
+        Nếu để watermark + chọn copy → hệ thống tự nâng lên libx264.
+    </small>
+    <hr style="border:none;border-top:1px solid var(--border);margin:16px 0 10px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <b style="color:var(--accent)">Scan sân (channel) từ NVR</b>
+      <div style="display:flex;gap:4px">
+        <button class="btn small" id="n-scan">📡 Dahua</button>
+        <button class="btn small" id="n-scan-onvif">📡 ONVIF</button>
+      </div>
+    </div>
+    <small id="n-scan-hint" style="color:var(--muted);font-size:11px;display:block">
+      "Dahua" = CGI ChannelTitle (nhanh, chuẩn). "ONVIF" = fallback cho NVR hãng khác
+      (Hikvision, Imou, generic) — nhớ enable ONVIF trong NVR trước.
+    </small>
+    <div id="n-scan-result" style="margin-top:10px;display:none;max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
+      <table>
+        <thead><tr>
+          <th style="width:36px;text-align:center">
+            <input type="checkbox" id="n-scan-all" title="Tick tất cả">
+          </th>
+          <th style="width:34px;text-align:center">Ch</th>
+          <th>Tên hiển thị cho khách</th>
+          <th style="width:72px">Sub</th>
+        </tr></thead>
+        <tbody id="n-scan-body"></tbody>
+      </table>
+    </div>
+    <div class="row right">
+      <button class="btn" id="n-cancel">Huỷ</button>
+      <button class="btn primary" id="n-ok">Lưu NVR + sân đã tick</button>
+    </div>
+  </div>
+</div>
+
+<div id="nvr-dash-modal" class="modal hidden">
+  <div class="modal-body" style="width:720px">
+    <h3 id="dash-title">Dashboard NVR</h3>
+
+    <details open style="margin-bottom:14px">
+      <summary style="cursor:pointer;color:var(--accent);font-weight:600">📊 System info</summary>
+      <div id="dash-sys" style="padding:10px 0 0 10px"></div>
+    </details>
+
+    <details open style="margin-bottom:14px">
+      <summary style="cursor:pointer;color:var(--accent);font-weight:600">💾 Storage (HDD)</summary>
+      <div id="dash-storage" style="padding:10px 0 0 10px"></div>
+    </details>
+
+    <details style="margin-bottom:14px">
+      <summary style="cursor:pointer;color:var(--accent);font-weight:600">🎨 Image settings (per channel)</summary>
+      <div style="padding:10px 0 0 10px">
+        <div class="kv">
+          <span>Channel:</span>
+          <input type="number" id="dash-img-ch" min="1" value="1" style="width:60px">
+          <button class="btn small" id="dash-img-load">Load</button>
+        </div>
+        <div id="dash-img" style="margin-top:10px"></div>
+      </div>
+    </details>
+
+    <details style="margin-bottom:14px">
+      <summary style="cursor:pointer;color:var(--accent);font-weight:600">📼 Record mode (per channel)</summary>
+      <div id="dash-record" style="padding:10px 0 0 10px"></div>
+    </details>
+
+    <details style="margin-bottom:14px">
+      <summary style="cursor:pointer;color:var(--danger);font-weight:600">⚠ Danger zone</summary>
+      <div style="padding:10px 0 0 10px">
+        <button class="btn" id="dash-reboot" style="background:rgba(248,113,113,0.1);color:var(--danger);border-color:var(--danger)">
+          🔌 Reboot NVR
+        </button>
+        <small style="color:var(--muted);display:block;margin-top:6px">
+          Mất 60-120s. Mọi cam offline trong lúc reboot.
+        </small>
+      </div>
+    </details>
+
+    <div class="row right">
+      <button class="btn" id="dash-close">Đóng</button>
+    </div>
+  </div>
+</div>
+
+<div id="osd-modal" class="modal hidden">
+  <div class="modal-body">
+    <h3>OSD (tiêu đề + thời gian) — tất cả kênh</h3>
+    <div id="osd-nvr-info" style="color:var(--muted);font-size:12px;margin-bottom:8px"></div>
+    <div class="row" style="margin-bottom:10px">
+      <button id="osd-reload" class="btn small">↻ Reload từ NVR</button>
+      <small id="osd-status" class="status"></small>
+    </div>
+    <div id="osd-table-wrap" style="max-height:60vh;overflow:auto;border:1px solid var(--border);border-radius:6px">
+      <table id="osd-table" style="margin-top:0">
+        <thead><tr>
+          <th>Ch</th>
+          <th>Tên hiện tại</th>
+          <th style="width:140px">Đổi tên</th>
+          <th title="Hiện tên camera trên stream">Tên</th>
+          <th title="Hiện timestamp trên stream">Giờ</th>
+        </tr></thead>
+        <tbody id="osd-tbody">
+          <tr><td colspan="5" style="text-align:center;color:var(--muted);padding:20px">
+            Đang tải từ NVR…</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <small style="color:var(--muted);display:block;margin-top:8px">
+      ⚠ Chỉ gửi những dòng có thay đổi. Áp dụng cho stream + recording, mất ~3s để NVR update.
+    </small>
+    <div class="row right">
+      <button class="btn" id="osd-cancel">Đóng</button>
+      <button class="btn primary" id="osd-apply">Áp dụng thay đổi</button>
+    </div>
+  </div>
+</div>
+
+<div id="logo-modal" class="modal hidden">
+  <div class="modal-body">
+    <h3>Logo watermark (Pickletour)</h3>
+    <div id="logo-nvr-info" style="color:var(--muted);font-size:12px;margin-bottom:12px"></div>
+    <label>Channel: <input id="lg-ch" type="number" min="1" value="1"></label>
+    <div class="row" style="margin:12px 0">
+      <button id="lg-load" class="btn">Load current</button>
+      <small id="lg-status" class="status"></small>
+    </div>
+    <div id="lg-current" style="font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--bg);padding:10px;border-radius:6px;margin-bottom:12px">
+      Chưa load
+    </div>
+    <label>Text (để trống = tắt logo):
+      <input id="lg-text" value="PICKLETOUR" placeholder="VD: PICKLETOUR">
+    </label>
+    <label>Vị trí:
+      <select id="lg-pos">
+        <option value="br" selected>Góc phải dưới</option>
+        <option value="tr">Góc phải trên</option>
+        <option value="bl">Góc trái dưới</option>
+        <option value="tl">Góc trái trên</option>
+      </select>
+    </label>
+    <label>Màu chữ:
+      <select id="lg-color">
+        <option value="255,255,255,255" selected>Trắng đục</option>
+        <option value="255,255,255,180">Trắng mờ</option>
+        <option value="255,215,0,255">Vàng</option>
+        <option value="255,80,80,255">Đỏ</option>
+        <option value="80,255,120,255">Xanh lá</option>
+        <option value="80,180,255,255">Xanh dương</option>
+      </select>
+    </label>
+    <small style="color:var(--muted);display:block;margin-top:8px">
+      ⚠ Logo bake vào stream (EncodeBlend) nên clip khách tải về cũng có. Mất ~3s để NVR update.
+    </small>
+    <div class="row right">
+      <button class="btn" id="lg-cancel">Đóng</button>
+      <button class="btn" id="lg-apply">Áp dụng channel này</button>
+      <button class="btn primary" id="lg-apply-all">Áp dụng TẤT CẢ channel</button>
+    </div>
+  </div>
+</div>
+
+<div id="codec-modal" class="modal hidden">
+  <div class="modal-body">
+    <h3>Chuyển codec Dahua</h3>
+    <div id="codec-nvr-info" style="color:var(--muted);font-size:12px;margin-bottom:12px"></div>
+    <label>Channel: <input id="cd-ch" type="number" min="1" value="1"></label>
+    <div class="row" style="margin:12px 0">
+      <button id="cd-load" class="btn">Load current</button>
+      <small id="cd-status" class="status"></small>
+    </div>
+    <div id="cd-current" style="font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--bg);padding:10px;border-radius:6px;margin-bottom:12px">
+      Chưa load
+    </div>
+    <label>Đổi Main stream sang:
+      <select id="cd-main">
+        <option value="">— giữ nguyên —</option>
+        <option value="H.264">H.264</option>
+        <option value="H.265">H.265</option>
+        <option value="MJPEG">MJPEG</option>
+      </select>
+    </label>
+    <label>Đổi Sub stream sang:
+      <select id="cd-sub">
+        <option value="">— giữ nguyên —</option>
+        <option value="H.264">H.264</option>
+        <option value="H.265">H.265</option>
+        <option value="MJPEG">MJPEG</option>
+      </select>
+    </label>
+    <small style="color:var(--muted);display:block;margin-top:8px">
+      ⚠ Đổi codec xong có thể cần ~5s để NVR áp dụng. Nếu đang stream, restart lại.
+    </small>
+    <div class="row right">
+      <button class="btn" id="cd-cancel">Đóng</button>
+      <button class="btn primary" id="cd-apply">Áp dụng</button>
+    </div>
+  </div>
+</div>
+
+<div id="ch-modal" class="modal hidden">
+  <div class="modal-body">
+    <h3>Thêm channel (sân)</h3>
+    <label>Tên hiển thị: <input id="c-name" placeholder="Sân 1 - Trung tâm"></label>
+    <label>NVR:
+      <select id="c-nvr"></select>
+    </label>
+    <label>Channel number: <input id="c-ch" type="number" value="1"></label>
+    <label>Subtype:
+      <select id="c-sub">
+        <option value="0">Main (HD)</option>
+        <option value="1">Sub (nhẹ)</option>
+      </select>
+    </label>
+    <label>Mô tả: <input id="c-desc" placeholder="(tuỳ chọn)"></label>
+    <div class="row right">
+      <button class="btn" id="c-cancel">Huỷ</button>
+      <button class="btn primary" id="c-ok">Lưu</button>
+    </div>
+  </div>
+</div>
+
+<footer><small>PiTailscale Recorder · <code id="footer-host">...</code></small><br>
+  <small style="color:var(--muted)">Công cụ được phát triển bởi <a href="https://pickletour.vn" target="_blank" style="color:var(--accent-2)">Pickletour.vn</a></small>
+</footer>
+
+<script src="/static/recorder.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+[Unit]
+Description=PiTailscale Monitor — system performance dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__INSTALL_DIR__
+Environment=PT_MONITOR_PORT=__MONITOR_PORT__
+ExecStart=__INSTALL_DIR__/.venv/bin/python __INSTALL_DIR__/monitor.py --host 0.0.0.0 --port __MONITOR_PORT__
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

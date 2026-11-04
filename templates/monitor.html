@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PiTailscale Monitor</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/monitor.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="dot"></span>
+    <h1>PiTailscale Monitor</h1>
+    <span class="sub">Live system stats</span>
+  </div>
+  <div id="hdr-info" class="net-info">...</div>
+</header>
+
+<main>
+  <section class="card">
+    <div class="stat-grid">
+      <div class="stat" id="s-cpu">
+        <div class="label">CPU</div>
+        <div class="val"><span id="cpu-pct">0</span><small>%</small></div>
+        <div class="bar"><div id="cpu-bar" class="bar-fill"></div></div>
+        <div class="meta" id="cpu-meta">—</div>
+      </div>
+      <div class="stat" id="s-mem">
+        <div class="label">RAM</div>
+        <div class="val"><span id="mem-pct">0</span><small>%</small></div>
+        <div class="bar"><div id="mem-bar" class="bar-fill"></div></div>
+        <div class="meta" id="mem-meta">—</div>
+      </div>
+      <div class="stat" id="s-disk">
+        <div class="label">Disk</div>
+        <div class="val"><span id="disk-pct">0</span><small>%</small></div>
+        <div class="bar"><div id="disk-bar" class="bar-fill"></div></div>
+        <div class="meta" id="disk-meta">—</div>
+      </div>
+      <div class="stat" id="s-temp">
+        <div class="label">Temp</div>
+        <div class="val"><span id="temp-val">0</span><small>°C</small></div>
+        <div class="bar"><div id="temp-bar" class="bar-fill"></div></div>
+        <div class="meta" id="temp-meta">—</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>CPU / RAM 60s</h2>
+    <div class="charts">
+      <div>
+        <div class="chart-label">CPU %</div>
+        <svg id="chart-cpu" viewBox="0 0 600 120" preserveAspectRatio="none"></svg>
+      </div>
+      <div>
+        <div class="chart-label">RAM %</div>
+        <svg id="chart-mem" viewBox="0 0 600 120" preserveAspectRatio="none"></svg>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Per-core CPU</h2>
+    <div id="cores" class="cores"></div>
+  </section>
+
+  <section class="card">
+    <h2>Network</h2>
+    <table id="net-table">
+      <thead><tr>
+        <th>Interface</th><th>RX</th><th>TX</th><th>RX total</th><th>TX total</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Top processes</h2>
+    <div class="row">
+      <label>Sort:
+        <select id="proc-sort">
+          <option value="cpu">CPU</option>
+          <option value="mem_pct">RAM %</option>
+          <option value="mem_mb">RAM MB</option>
+        </select>
+      </label>
+      <label>Filter: <input id="proc-filter" placeholder="name/user/cmd"></label>
+      <small id="proc-count"></small>
+    </div>
+    <table id="proc-table">
+      <thead><tr>
+        <th>PID</th><th>User</th><th>Name</th>
+        <th>CPU %</th><th>RAM %</th><th>RAM MB</th><th>Status</th><th>Command</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<footer>
+  <small>PiTailscale Monitor · auto-refresh 2s · <code id="footer-host">...</code></small>
+</footer>
+
+<script src="/static/monitor.js"></script>
+</body>
+</html>

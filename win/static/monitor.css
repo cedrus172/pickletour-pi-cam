@@ -1,0 +1,83 @@
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+.stat {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+.stat .label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.stat .val {
+  font-size: 32px;
+  font-weight: 600;
+  color: var(--accent);
+  line-height: 1;
+}
+.stat .val small { font-size: 14px; color: var(--muted); margin-left: 4px; font-weight: 400; }
+.stat .bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 12px 0 8px;
+}
+.bar-fill {
+  height: 100%;
+  background: var(--accent-2);
+  transition: width 0.4s ease, background 0.4s;
+}
+.bar-fill.warn { background: var(--warn); }
+.bar-fill.danger { background: var(--danger); }
+.stat .meta {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--accent); margin: 0 0 12px; }
+
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.chart-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+svg#chart-cpu, svg#chart-mem {
+  width: 100%; height: 120px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.cores { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px; }
+.core {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.core .num { color: var(--muted); }
+.core .pct { font-size: 15px; font-weight: 600; color: var(--accent); }
+.core .mini-bar { height: 3px; background: var(--border); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+.core .mini-bar div { height: 100%; background: var(--accent-2); transition: width 0.3s; }
+
+#proc-table td, #net-table td { padding: 6px 8px; font-size: 12px; }
+#proc-table td.cmd {
+  font-family: var(--mono); color: var(--muted);
+  max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#proc-table tbody tr:hover { background: rgba(111, 168, 255, 0.08); }
+.pid { color: var(--muted); font-family: var(--mono); }
+.user { font-family: var(--mono); font-size: 11px; }
+.cpu-cell, .mem-cell { font-family: var(--mono); text-align: right; }
+
+@media (max-width: 768px) {
+  .charts { grid-template-columns: 1fr; }
+}

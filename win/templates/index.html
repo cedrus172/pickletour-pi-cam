@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PiTailscale — Camera Discovery & Forward</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="dot"></span>
+    <h1>PiTailscale</h1>
+    <span class="sub">LAN camera discovery &amp; Tailscale forwarder</span>
+  </div>
+  <div id="net-info" class="net-info">...</div>
+</header>
+
+<main>
+  <section class="card">
+    <div class="card-head">
+      <h2>1 · Quét mạng LAN</h2>
+      <div class="row">
+        <label>Subnet:
+          <input id="subnet" type="text" placeholder="auto-detect">
+        </label>
+        <button id="btn-scan" class="btn primary">Scan</button>
+        <span id="scan-status" class="status"></span>
+      </div>
+    </div>
+    <div id="scan-results"></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>2 · Thử credentials</h2>
+      <div class="row">
+        <label>User: <input id="cred-user" type="text" value="admin"></label>
+        <label>Password: <input id="cred-pass" type="password"></label>
+        <button id="btn-probe-all" class="btn">Probe tất cả camera đã scan</button>
+      </div>
+      <small>Credentials sẽ được thử với từng camera (HTTP Basic + Digest).</small>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>3 · Port forward do app này quản lý</h2>
+      <div class="row">
+        <button id="btn-refresh-fw" class="btn">Refresh</button>
+        <small id="ts-hint"></small>
+      </div>
+    </div>
+    <table id="fw-table">
+      <thead><tr>
+        <th>#</th><th>Name</th><th>LAN target</th><th>Proto</th>
+        <th>Tailscale URL</th><th>Status</th><th></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>4 · Tất cả port đang listen trên server (socat/nginx/other)</h2>
+      <div class="row">
+        <button id="btn-refresh-sys" class="btn">Refresh</button>
+        <label><input type="checkbox" id="sys-only-forwards" checked> Chỉ hiện port có target (socat forward)</label>
+      </div>
+    </div>
+    <table id="sys-table">
+      <thead><tr>
+        <th>Port</th><th>Proto</th><th>Bind</th><th>Process</th>
+        <th>LAN target</th><th>Tailscale URL</th><th>Managed</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-body">
+    <h3>Tạo forward</h3>
+    <label>Tên: <input id="m-name"></label>
+    <label>IP: <input id="m-ip"></label>
+    <label>Port: <input id="m-port" type="number"></label>
+    <label>Protocol:
+      <select id="m-proto">
+        <option value="tcp">TCP</option>
+        <option value="udp">UDP</option>
+      </select>
+    </label>
+    <label>Ghi chú: <input id="m-notes"></label>
+    <div class="row right">
+      <button class="btn" id="m-cancel">Huỷ</button>
+      <button class="btn primary" id="m-ok">Tạo</button>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <small>PiTailscale · deploy on <code id="host-info">...</code></small>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
