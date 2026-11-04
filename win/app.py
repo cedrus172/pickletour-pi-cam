@@ -11,6 +11,14 @@ from pathlib import Path
 import urllib3
 from flask import Flask, jsonify, render_template, request
 
+# Windows console mặc định cp1252 — in tiếng Việt sẽ UnicodeEncodeError.
+# Ép stdout/stderr UTF-8 trước bất cứ print nào (argparse --help đọc sớm lắm).
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import forwarder
 import scanner
 
