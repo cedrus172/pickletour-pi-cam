@@ -73,6 +73,15 @@ async function doScan() {
       body: JSON.stringify({ subnet }),
     });
     LAST = r;
+    if (r.error) {
+      $("#scan-results").innerHTML =
+        `<div style="color:var(--danger);background:rgba(248,113,113,0.1);padding:14px;border-radius:6px;font-size:13px;line-height:1.5">
+          ⚠ Không scan được: ${r.error.replace(/</g,'&lt;')}
+        </div>`;
+      $("#scan-status").textContent = "lỗi scanner";
+      $("#scan-status").className = "status err";
+      return;
+    }
     const cams = r.cameras || [];
     const others = r.others || [];
     $("#scan-results").innerHTML =

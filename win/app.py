@@ -153,6 +153,36 @@ def _exe_path() -> str:
     return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
 
 
+def _check_nmap() -> bool:
+    for p in (r"C:\Program Files (x86)\Nmap\nmap.exe",
+              r"C:\Program Files\Nmap\nmap.exe"):
+        if os.path.exists(p):
+            return True
+    try:
+        r = subprocess.run(["nmap", "--version"], capture_output=True, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _install_nmap_winget():
+    print("» Nmap chưa có → thử cài qua winget...")
+    try:
+        subprocess.run(
+            ["winget", "install", "-e", "--id", "Insecure.Nmap",
+             "--accept-source-agreements", "--accept-package-agreements"],
+            timeout=180,
+        )
+        if _check_nmap():
+            print("✓ Nmap installed")
+            return True
+    except Exception as e:
+        print(f"! winget fail: {e}")
+    print("! Vẫn chưa có nmap. Tải thủ công: https://nmap.org/download.html")
+    print("  (scan IP sẽ không chạy đến khi cài xong — các chức năng khác vẫn OK)")
+    return False
+
+
 def cmd_install(port: int):
     if os.name != "nt":
         print("install chỉ chạy trên Windows"); sys.exit(1)
@@ -160,6 +190,11 @@ def cmd_install(port: int):
         print("✗ Cần chạy as Administrator để đăng ký Task Scheduler.")
         print("  Chuột phải .exe → Run as administrator, rồi chạy lại: pitailscale.exe --install")
         sys.exit(1)
+
+    if not _check_nmap():
+        _install_nmap_winget()
+    else:
+        print("✓ Nmap đã có sẵn")
 
     exe = _exe_path()
     print(f"» Đăng ký task '{TASK_NAME}' chạy khi boot...")

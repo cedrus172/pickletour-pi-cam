@@ -113,23 +113,32 @@ def get_tailscale_ip() -> str:
     return ""
 
 
+class ScanError(RuntimeError):
+    """Scanner không hoạt động được — caller bắt rồi trả JSON {error:...} cho UI."""
+
+
 def nmap_scan(subnet: str) -> list:
-    """Return list of {ip, ports:[int]} for live hosts with any camera port open."""
+    """Return list of {ip, ports:[int]} for live hosts với port camera mở.
+    Raise ScanError nếu nmap missing/lỗi — không nhét error vào list."""
     exe = _find_executable(_NMAP_PATHS)
     if not exe:
-        return [{"error": "nmap.exe not found — install from https://nmap.org/download.html"}]
+        raise ScanError(
+            "nmap chưa được cài. Mở PowerShell admin: "
+            "winget install -e --id Insecure.Nmap  "
+            "(hoặc tải từ https://nmap.org/download.html)")
     ports_arg = ",".join(str(p) for p in CAMERA_PORTS)
     try:
         out = subprocess.run(
             [exe, "-Pn", "-T4", "--open", "-p", ports_arg, "-oX", "-", subnet],
             capture_output=True, text=True, check=True, timeout=600,
-            # Ẩn cửa sổ console khi Flask chạy ở background
             creationflags=0x08000000 if os.name == "nt" else 0,
         ).stdout
     except subprocess.TimeoutExpired:
-        return []
+        raise ScanError(f"nmap quá thời gian (10 phút) cho subnet {subnet}")
+    except subprocess.CalledProcessError as e:
+        raise ScanError(f"nmap rc={e.returncode}: {(e.stderr or '')[:300]}")
     except Exception as e:
-        return [{"error": str(e)}]
+        raise ScanError(f"nmap lỗi: {type(e).__name__}: {e}")
 
     hosts = []
     try:
@@ -282,7 +291,16 @@ def detect_existing_forwards(tailscale_ip: str) -> list:
 
 def scan(subnet: str = "") -> dict:
     subnet = subnet or detect_local_subnet()
-    hosts = nmap_scan(subnet)
+    try:
+        hosts = nmap_scan(subnet)
+    except ScanError as e:
+        return {
+            "subnet": subnet,
+            "tailscale_ip": get_tailscale_ip(),
+            "total_hosts": 0,
+            "cameras": [], "others": [],
+            "error": str(e),
+        }
     hosts = fingerprint_hosts(hosts)
     cameras = [h for h in hosts if h.get("is_camera_candidate")]
     return {
