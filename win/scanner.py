@@ -127,16 +127,23 @@ def nmap_scan(subnet: str) -> list:
             "winget install -e --id Insecure.Nmap  "
             "(hoặc tải từ https://nmap.org/download.html)")
     ports_arg = ",".join(str(p) for p in CAMERA_PORTS)
+    # -sT = TCP connect scan user-space (không cần Npcap/raw socket).
+    # -Pn = bỏ ping (nhiều cam chặn ICMP). -n = skip DNS. -T4 = aggressive.
+    args = [exe, "-sT", "-Pn", "-n", "-T4", "--open",
+            "-p", ports_arg, "-oX", "-", subnet]
     try:
         out = subprocess.run(
-            [exe, "-Pn", "-T4", "--open", "-p", ports_arg, "-oX", "-", subnet],
-            capture_output=True, text=True, check=True, timeout=600,
+            args, capture_output=True, text=True, check=True, timeout=600,
             creationflags=0x08000000 if os.name == "nt" else 0,
         ).stdout
     except subprocess.TimeoutExpired:
         raise ScanError(f"nmap quá thời gian (10 phút) cho subnet {subnet}")
     except subprocess.CalledProcessError as e:
-        raise ScanError(f"nmap rc={e.returncode}: {(e.stderr or '')[:300]}")
+        err = (e.stderr or "")[:400]
+        hint = ""
+        if "pcap" in err.lower() or "npcap" in err.lower():
+            hint = "  → Nếu cần scan nhanh hơn, cài Npcap: https://npcap.com/dist/npcap-1.79.exe"
+        raise ScanError(f"nmap rc={e.returncode}: {err}{hint}")
     except Exception as e:
         raise ScanError(f"nmap lỗi: {type(e).__name__}: {e}")
 
