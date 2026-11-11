@@ -538,25 +538,127 @@ def _xml_escape(s: str) -> str:
 
 
 # ============================================================================
-# FAST CLIP — Hikvision (RTSP playback → MP4 remux)
+# FAST CLIP — Hikvision (ISAPI /ContentMgmt/download → fallback RTSP playback)
 # ============================================================================
+def _hik_isapi_download(nvr: dict, channel: int, start_human: str,
+                        end_human: str, tmp_path: Path,
+                        progress_cb=None, timeout: int = 1800) -> tuple:
+    """Tải clip qua Hik ISAPI /ContentMgmt/download — NVR push file ở tốc độ
+    ổ cứng (~10-20× realtime, tương đương Dahua loadfile.cgi).
+    Response thường là MP4 binary trực tiếp.
+    Trả (ok, err_msg_hoặc_'')."""
+    start_hik = human_to_hik(start_human)
+    end_hik = human_to_hik(end_human)
+    host = nvr["host"]
+    port = nvr.get("rtsp_port", 554)
+    # NVR lưu record trackID = channel*100+1 (main). size=0 → NVR tự quyết.
+    playback_uri = (f"rtsp://{host}:{port}/Streaming/tracks/{channel}01"
+                    f"?starttime={start_hik}&endtime={end_hik}&name=clip&size=0")
+    body = (f'<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<downloadRequest version="1.0" '
+            f'xmlns="http://www.hikvision.com/ver20/XMLSchema">\n'
+            f'  <playbackURI>{_xml_escape(playback_uri)}</playbackURI>\n'
+            f'</downloadRequest>\n')
+    url = f"http://{host}/ISAPI/ContentMgmt/download"
+    received = 0
+    try:
+        with requests.post(url, data=body.encode("utf-8"),
+                           headers={"Content-Type": "application/xml"},
+                           auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                           stream=True, timeout=timeout, verify=False) as r:
+            if r.status_code != 200:
+                return False, f"HTTP {r.status_code}: {r.text[:200]}"
+            ct = (r.headers.get("Content-Type") or "").lower()
+            if "xml" in ct or "html" in ct:
+                return False, f"non-binary response ({ct}): {r.text[:200]}"
+            with open(tmp_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=131072):
+                    if chunk:
+                        f.write(chunk)
+                        received += len(chunk)
+                        if progress_cb:
+                            try: progress_cb(received)
+                            except Exception: pass
+    except Exception as e:
+        try: tmp_path.unlink()
+        except Exception: pass
+        return False, f"{type(e).__name__}: {e}"
+    if received < 1024:
+        try: tmp_path.unlink()
+        except Exception: pass
+        return False, f"empty response ({received}B — có thể không có bản ghi trong khoảng)"
+    return True, ""
+
+
 def fast_clip_hik(nvr: dict, channel: int, start_human: str, end_human: str,
                   out_path: Path, progress_cb=None, watermark: str = "",
                   wm_pos: str = "bl", wm_scroll: int = 0, wm_size: int = 40,
                   encoder: str = "copy") -> tuple:
-    """Download clip qua Hik RTSP playback + ffmpeg. start_human/end_human:
-    'YYYY-MM-DD HH:MM:SS'. Trả (ok, err_msg).
-
-    Hik không có equivalent 'nhanh' như Dahua loadfile.cgi; dùng RTSP playback
-    + ffmpeg -c copy MP4 vẫn đạt tốc độ ~ realtime từ NVR (LAN speed)."""
+    """Hik clip extraction 2-tier:
+    1. ISAPI /ContentMgmt/download (disk-speed ~10-20× realtime, tương đương
+       Dahua loadfile.cgi) → nếu MP4 hợp lệ → remux faststart + bake watermark
+    2. Fallback RTSP playback (1× realtime) nếu ISAPI không support firmware
+    start_human/end_human: 'YYYY-MM-DD HH:MM:SS'. Trả (ok, err)."""
     import subprocess
     from rec_shared import build_drawtext, encoder_args, _probe_vcodec, _is_hevc
 
+    log = out_path.with_suffix(".log")
+
+    # === TIER 1: ISAPI download (disk-speed) ===
+    isapi_tmp = out_path.with_suffix(".hik.mp4.tmp")
+    with open(log, "ab") as f:
+        f.write(b"[tier1] ISAPI /ContentMgmt/download\n")
+    ok, err = _hik_isapi_download(nvr, channel, start_human, end_human,
+                                  isapi_tmp, progress_cb=progress_cb,
+                                  timeout=1800)
+    if ok:
+        with open(log, "ab") as f:
+            f.write(f"[tier1] downloaded {isapi_tmp.stat().st_size}B\n".encode())
+        # Remux để add faststart + watermark nếu cần
+        drawtext = build_drawtext(watermark, out_path, wm_pos, wm_scroll,
+                                  wm_size) if watermark else ""
+        enc_args, enc_name = encoder_args(encoder, bool(drawtext))
+        args = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-i", str(isapi_tmp)]
+        if drawtext:
+            vf = drawtext if enc_name != "h264_v4l2m2m" else "format=yuv420p," + drawtext
+            args += ["-vf", vf, *enc_args]
+        else:
+            no_wm_args, no_wm_name = encoder_args(encoder or "copy", False)
+            args += [*no_wm_args]
+            enc_name = no_wm_name
+            if no_wm_name == "copy":
+                vcodec = _probe_vcodec(isapi_tmp)
+                if _is_hevc(vcodec):
+                    args += ["-tag:v", "hvc1"]
+        args += ["-c:a", "aac", "-b:a", "128k",
+                 "-movflags", "+faststart", "-y", str(out_path)]
+        try:
+            with open(log, "ab") as f:
+                f.write(f"[tier1 remux] {enc_name}\n".encode())
+                rc = subprocess.run(args, stdout=f, stderr=f, timeout=1800).returncode
+        except subprocess.TimeoutExpired:
+            rc = -1
+        finally:
+            try: isapi_tmp.unlink()
+            except Exception: pass
+            if drawtext:
+                try: out_path.with_suffix(".wm.txt").unlink(missing_ok=True)
+                except Exception: pass
+        if rc == 0 and out_path.exists() and out_path.stat().st_size > 1024:
+            with open(log, "ab") as f:
+                f.write(b"[tier1] OK\n")
+            return True, ""
+        with open(log, "ab") as f:
+            f.write(f"[tier1 remux] fail rc={rc} → fallback RTSP\n".encode())
+    else:
+        with open(log, "ab") as f:
+            f.write(f"[tier1] skip: {err} → fallback RTSP\n".encode())
+
+    # === TIER 2: RTSP playback fallback (1× realtime) ===
     start = human_to_hik(start_human)
     end = human_to_hik(end_human)
     rtsp = rtsp_playback(nvr, channel, start, end)
-
-    log = out_path.with_suffix(".log")
     drawtext = build_drawtext(watermark, out_path, wm_pos, wm_scroll, wm_size) if watermark else ""
     enc_args, enc_name = encoder_args(encoder, bool(drawtext))
 
@@ -585,7 +687,7 @@ def fast_clip_hik(nvr: dict, channel: int, start_human: str, end_human: str,
     enc_timeout = 1800
     try:
         with open(log, "ab") as f:
-            f.write(f"[encoder] {enc_name} [vendor] hikvision\n".encode())
+            f.write(f"[tier2 RTSP] encoder={enc_name}\n".encode())
             p = subprocess.run(args, stdout=f, stderr=f, timeout=enc_timeout)
         rc = p.returncode
         if rc != 0 and enc_name == "h264_v4l2m2m":
