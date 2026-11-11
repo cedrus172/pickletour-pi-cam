@@ -203,10 +203,13 @@ def stop_pid(pid: int) -> None:
             pass
 
 
-def popen_detached(args, stdout=None, stderr=None):
+def popen_detached(args, stdout=None, stderr=None, cwd=None):
     """subprocess.Popen cross-platform: Unix start_new_session=True,
-    Windows CREATE_NEW_PROCESS_GROUP (để CTRL_BREAK_EVENT work)."""
+    Windows CREATE_NEW_PROCESS_GROUP (để CTRL_BREAK_EVENT work).
+    cwd optional (ffmpeg fmp4 HLS cần working dir để tạo init.mp4 đúng chỗ)."""
     kw = {"stdout": stdout, "stderr": stderr}
+    if cwd is not None:
+        kw["cwd"] = cwd
     if IS_WIN:
         kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:

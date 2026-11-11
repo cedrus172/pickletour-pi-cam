@@ -553,11 +553,12 @@ def api_stream_start():
 
     rtsp = _rtsp_url(nvr, channel, mode, start, end, subtype)
     log = sdir / "ffmpeg.log"
+    # ffmpeg chạy TRONG sdir (cwd), tất cả filename relative → tránh Windows
+    # path escape issue với init.mp4 / seg_*.m4s của fmp4 HLS.
     # analyzeduration + probesize PHẢI đứng trước -i, nếu không Hik h264
-    # trả "non-existing PPS 0" và "dimensions not set" (SPS/PPS chưa đến
-    # khi ffmpeg bắt đầu ghi HLS header). 10s/10MB buffer đủ cho mọi NVR.
+    # trả "non-existing PPS 0" khi SPS/PPS chưa kịp đến.
     args = [
-        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning",
         "-rtsp_transport", "tcp",
         "-analyzeduration", "10000000",
         "-probesize", "10000000",
@@ -571,12 +572,13 @@ def api_stream_start():
         "-hls_flags", "delete_segments+append_list+independent_segments",
         "-hls_segment_type", "fmp4",  # H.265/HEVC compat
         "-hls_fmp4_init_filename", "init.mp4",
-        "-hls_segment_filename", str(sdir / "seg_%04d.m4s"),
-        str(sdir / "index.m3u8"),
+        "-hls_segment_filename", "seg_%04d.m4s",
+        "index.m3u8",
     ]
     with open(log, "ab") as f:
         import rec_shared as _rs
-        p = _rs.popen_detached(args, stdout=f, stderr=f)
+        f.write(f"[cmd] cwd={sdir}\n[cmd] {' '.join(args)}\n".encode())
+        p = _rs.popen_detached(args, stdout=f, stderr=f, cwd=str(sdir))
 
     with _sessions_lock:
         _sessions[sid] = {
@@ -615,6 +617,27 @@ def api_stream_stop():
     _kill_pid(s["pid"])
     shutil.rmtree(s["dir"], ignore_errors=True)
     return jsonify({"ok": True})
+
+
+@app.get("/api/stream/<sid>/log")
+def api_stream_log(sid):
+    """Debug: tail ffmpeg log của session để biết sao stream chết."""
+    if not re.match(r"^[a-f0-9]{12}$", sid):
+        return jsonify({"error": "invalid sid"}), 400
+    log = STREAM_DIR / sid / "ffmpeg.log"
+    if not log.exists():
+        return jsonify({"error": "log not found", "sid": sid}), 404
+    try:
+        txt = log.read_text(errors="replace")[-8000:]
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    files = []
+    try:
+        for p in (STREAM_DIR / sid).iterdir():
+            files.append({"name": p.name, "size": p.stat().st_size})
+    except Exception:
+        pass
+    return jsonify({"log": txt, "files": files, "sid": sid})
 
 
 @app.get("/stream/<sid>/<path:filename>")
