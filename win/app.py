@@ -7,10 +7,15 @@ Modes:
 
 Install (as Administrator):
   pitailscale.exe --install
-    → đăng ký 3 Task Scheduler entries + 3 firewall rules
-      (PiTailscale-Gateway / -Recorder / -Clip)
+    → đăng ký 4 Task Scheduler entries + 3 firewall rules
+      (PiTailscale-Gateway / -Recorder / -Clip / -Updater)
     → tự cài nmap qua winget nếu chưa có
     → bundled ffmpeg.exe trong .exe tự dùng được (prepend PATH)
+
+Auto-update:
+  Task -Updater chạy 3h sáng mỗi ngày → check GitHub Release mới hơn →
+  tự tải .exe mới, swap file, restart 3 service. Không cần thao tác tay.
+  Manual trigger: pitailscale.exe --update
 
 Uninstall:
   pitailscale.exe --uninstall
@@ -22,7 +27,19 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
+
+# BUILD_NUMBER: CI pyinstaller --add-data ghi file build_info.py với số
+# github.run_number. Dev mode không có file → default '0' (local build).
+try:
+    from build_info import BUILD_NUMBER
+except Exception:
+    BUILD_NUMBER = os.environ.get("PT_BUILD_NUMBER", "0")
+
+# Auto-update endpoint (GitHub public repo)
+UPDATE_REPO = "cedrus172/pickletour-pi-cam"
+UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
 
 # Windows console mặc định cp1252 — in tiếng Việt sẽ UnicodeEncodeError.
 # Ép stdout/stderr UTF-8 trước bất cứ print nào (argparse --help đọc sớm lắm).
@@ -333,14 +350,148 @@ def cmd_install():
         subprocess.run(["schtasks", "/Run", "/TN", task_name], capture_output=True)
         print(f"  ✓ Started")
 
+    # Auto-update task: chạy 3h sáng mỗi ngày, silent mode
+    print()
+    print(f"» [updater] đăng ký auto-update daily 03:00...")
+    subprocess.run(["schtasks", "/Delete", "/TN", UPDATER_TASK, "/F"],
+                   capture_output=True)
+    r = subprocess.run([
+        "schtasks", "/Create", "/TN", UPDATER_TASK,
+        "/TR", f'{exe} --update-silent',
+        "/SC", "DAILY", "/ST", "03:00",
+        "/RU", "SYSTEM", "/RL", "HIGHEST", "/F",
+    ], capture_output=True, text=True)
+    if r.returncode == 0:
+        print(f"  ✓ Task '{UPDATER_TASK}' created (daily 03:00)")
+    else:
+        print(f"  ! updater schtasks fail: {r.stderr.strip()}")
+
     print()
     print("=" * 60)
+    print(f"  Build    : build-{BUILD_NUMBER}")
     print(f"  Gateway  : http://localhost:9999  (hoặc http://<ts-ip>:9999)")
     print(f"  Recorder : http://localhost:9997  (admin NVR)")
     print(f"  Clip     : http://localhost:9996  (public khách)")
     print()
     print(f"  Stop     : schtasks /End /TN PiTailscale-Gateway (hoặc -Recorder/-Clip)")
+    print(f"  Update   : pitailscale.exe --update  (manual)")
     print(f"  Uninstall: pitailscale.exe --uninstall")
+
+
+UPDATER_TASK = "PiTailscale-Updater"
+
+
+def _parse_build_num(tag: str) -> int:
+    """Parse 'build-15' → 15. Trả -1 nếu format khác."""
+    if not tag:
+        return -1
+    s = tag.rsplit("-", 1)[-1] if "-" in tag else tag
+    try:
+        return int(s)
+    except ValueError:
+        return -1
+
+
+def cmd_version():
+    print(f"PiTailscale build-{BUILD_NUMBER}")
+
+
+def cmd_update(silent: bool = False):
+    """Tải .exe mới từ GitHub Release nếu có build-N cao hơn hiện tại.
+    Self-replace qua Windows rename trick (có thể rename file .exe đang chạy).
+    Sau khi swap xong, restart 3 service task — Task Scheduler tự launch lại
+    qua .exe path, process cũ chết, process mới dùng binary mới.
+    silent=True: không print + không fail nếu đã latest (dùng cho cron)."""
+    import json, urllib.request
+
+    def say(msg):
+        if not silent:
+            print(msg)
+
+    say(f"» current: build-{BUILD_NUMBER}")
+    say(f"» checking {UPDATE_API}")
+    try:
+        req = urllib.request.Request(UPDATE_API,
+                                     headers={"User-Agent": "pitailscale-updater"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            rel = json.load(r)
+    except Exception as e:
+        say(f"✗ API fetch fail: {e}")
+        return 1
+
+    tag = rel.get("tag_name", "")
+    new_num = _parse_build_num(tag)
+    cur_num = _parse_build_num(f"build-{BUILD_NUMBER}")
+    say(f"» latest: {tag} (build-{new_num})")
+
+    if new_num <= cur_num:
+        say(f"✓ already latest — no update needed.")
+        return 0
+
+    exe_asset = next((a for a in rel.get("assets", [])
+                      if a["name"].lower().endswith(".exe")), None)
+    if not exe_asset:
+        say(f"✗ release {tag} không có .exe asset")
+        return 2
+    url = exe_asset["browser_download_url"]
+    size_mb = exe_asset.get("size", 0) / 1024 / 1024
+    say(f"» downloading {size_mb:.1f} MB ...")
+
+    me = Path(sys.executable if getattr(sys, "frozen", False) else __file__)
+    tmp = me.with_name(me.stem + ".new" + me.suffix)
+    old = me.with_name(me.stem + ".old" + me.suffix)
+
+    try:
+        req = urllib.request.Request(url,
+                                     headers={"User-Agent": "pitailscale-updater"})
+        with urllib.request.urlopen(req, timeout=300) as r, open(tmp, "wb") as f:
+            while True:
+                chunk = r.read(1024 * 1024)
+                if not chunk: break
+                f.write(chunk)
+    except Exception as e:
+        try: tmp.unlink()
+        except Exception: pass
+        say(f"✗ download fail: {e}")
+        return 3
+
+    # Windows rename trick: file .exe đang chạy CÓ THỂ rename (khác với
+    # Unix, nơi inode open vẫn tồn tại). Delete .old nếu còn từ lần trước.
+    try: old.unlink()
+    except FileNotFoundError: pass
+    except Exception: pass
+
+    if not getattr(sys, "frozen", False):
+        # Dev mode (chạy từ .py): KHÔNG swap, chỉ report
+        say(f"✓ dev mode: downloaded to {tmp}")
+        return 0
+
+    try:
+        me.rename(old)
+        tmp.rename(me)
+    except Exception as e:
+        say(f"✗ swap fail: {e}")
+        try: tmp.unlink()
+        except Exception: pass
+        return 4
+
+    # Restart 3 service. Task Scheduler sẽ launch .exe mới (cùng path).
+    # Process updater này tự chết sau khi return (Windows không kill
+    # runaway rename-ed exe process).
+    say(f"» restart 3 service task...")
+    for mode, (_fn, _port, task_name, _desc) in MODES.items():
+        subprocess.run(["schtasks", "/End", "/TN", task_name], capture_output=True)
+    time.sleep(1)
+    for mode, (_fn, _port, task_name, _desc) in MODES.items():
+        subprocess.run(["schtasks", "/Run", "/TN", task_name], capture_output=True)
+
+    # Cleanup .old best-effort (có thể bị lock)
+    time.sleep(2)
+    try: old.unlink()
+    except Exception: pass
+
+    say(f"✓ UPDATED build-{cur_num} → build-{new_num}")
+    return 0
 
 
 def cmd_uninstall():
@@ -348,6 +499,7 @@ def cmd_uninstall():
         print("uninstall chỉ chạy trên Windows"); sys.exit(1)
     if not _is_admin():
         print("✗ Cần chạy as Administrator"); sys.exit(1)
+    all_tasks = [t for _, _, t, _ in MODES.values()] + [UPDATER_TASK]
     for mode, (_fn, port, task_name, _desc) in MODES.items():
         print(f"» [{mode}] gỡ task + firewall...")
         subprocess.run(["schtasks", "/End", "/TN", task_name], capture_output=True)
@@ -355,6 +507,11 @@ def cmd_uninstall():
                        capture_output=True)
         subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule",
                         f"name={task_name} TCP {port}"], capture_output=True)
+    # Updater task riêng (không có firewall)
+    print(f"» [updater] gỡ task...")
+    subprocess.run(["schtasks", "/End", "/TN", UPDATER_TASK], capture_output=True)
+    subprocess.run(["schtasks", "/Delete", "/TN", UPDATER_TASK, "/F"],
+                   capture_output=True)
 
     # Kill mọi pitailscale.exe process còn sống (orphan sau schtasks /End).
     # Ngoại trừ chính process uninstall này — nhưng /IM filter + /F sẽ cover
@@ -390,8 +547,20 @@ def main():
                     help="Đăng ký 3 Task Scheduler + firewall + start (cần admin)")
     ap.add_argument("--uninstall", action="store_true",
                     help="Gỡ tất cả task + firewall (cần admin)")
+    ap.add_argument("--update", action="store_true",
+                    help="Check + tải bản mới từ GitHub Release, swap .exe, restart services")
+    ap.add_argument("--update-silent", action="store_true",
+                    help="Giống --update nhưng không in log + return 0 nếu đã latest (cron)")
+    ap.add_argument("--version", action="store_true",
+                    help="In build number hiện tại")
     args = ap.parse_args()
 
+    if args.version:
+        cmd_version(); return
+    if args.update:
+        sys.exit(cmd_update(silent=False))
+    if args.update_silent:
+        sys.exit(cmd_update(silent=True))
     if args.install:
         cmd_install(); return
     if args.uninstall:

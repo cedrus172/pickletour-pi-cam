@@ -34,6 +34,7 @@ a = Analysis(
     hiddenimports=[
         'rec_shared', 'vendors', 'recorder', 'clipapp',
         'scanner', 'forwarder',
+        'build_info',  # CI generate, embed BUILD_NUMBER
         'jinja2.ext',
     ],
     hookspath=[],
