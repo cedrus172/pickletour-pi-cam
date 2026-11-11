@@ -98,12 +98,19 @@ def _db():
 
 def _rtsp_url(nvr: dict, channel: int, mode: str = "live",
               start: str = "", end: str = "", subtype: int = 0) -> str:
-    user = urllib.parse.quote(nvr["user"], safe="")
-    pw = urllib.parse.quote(nvr["password"], safe="")
-    base = f"rtsp://{user}:{pw}@{nvr['host']}:{nvr['rtsp_port']}"
+    """Vendor-aware RTSP URL builder. Dispatch sang vendors.rtsp_live /
+    rtsp_playback. nvr dict phải có 'vendor' (fallback 'dahua' nếu thiếu)."""
+    import vendors as _v
+    nvr = dict(nvr); nvr.setdefault("vendor", "dahua")
     if mode == "live":
-        return f"{base}/cam/realmonitor?channel={channel}&subtype={subtype}"
-    return f"{base}/cam/playback?channel={channel}&starttime={start}&endtime={end}"
+        return _v.rtsp_live(nvr, channel, subtype)
+    # Playback: Dahua giữ 'YYYY_MM_DD_HH_MM_SS', Hik cần 'YYYYMMDDTHHMMSSZ'.
+    if _v.vendor_of(nvr) == "hikvision":
+        if "_" in start:
+            start = _v.dahua_time_to_hik(start)
+        if "_" in end:
+            end = _v.dahua_time_to_hik(end)
+    return _v.rtsp_playback(nvr, channel, start, end)
 
 
 def _parse_dt(s: str) -> str:
@@ -250,38 +257,20 @@ def api_get_encode(nid):
 
 @app.get("/api/nvrs/<int:nid>/osd")
 def api_get_osd(nid):
-    """Fetch Dahua OSD config (channel title + time title visibility)."""
-    import requests
-    from requests.auth import HTTPDigestAuth
-    channel = int(request.args.get("channel", 1)) - 1
+    """Fetch OSD config cho 1 channel — vendor-aware (reuse bulk)."""
+    import vendors as _v
+    channel = int(request.args.get("channel", 1))
     with _db() as conn:
         row = conn.execute("SELECT * FROM nvrs WHERE id=?", (nid,)).fetchone()
     if not row:
         return jsonify({"error": "nvr not found"}), 404
-    nvr = dict(row)
-    url = f"http://{nvr['host']}/cgi-bin/configManager.cgi?action=getConfig&name=VideoWidget"
-    try:
-        r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
-                         timeout=10, verify=False)
-    except Exception as e:
-        return jsonify({"error": f"request fail: {e}"}), 500
-    if r.status_code != 200:
-        return jsonify({"error": f"HTTP {r.status_code}"}), 500
-
-    out = {"channel": channel + 1,
-           "channel_title": None, "time_title": None, "channel_name": ""}
-    for line in r.text.splitlines():
-        prefix = f"table.VideoWidget[{channel}]."
-        if not line.startswith(prefix):
-            continue
-        key = line[len(prefix):]
-        if key.startswith("ChannelTitle.EncodeBlend="):
-            out["channel_title"] = key.split("=", 1)[1].strip().lower() == "true"
-        elif key.startswith("TimeTitle.EncodeBlend="):
-            out["time_title"] = key.split("=", 1)[1].strip().lower() == "true"
-        elif key.startswith("ChannelTitle.ChannelName="):
-            out["channel_name"] = key.split("=", 1)[1].strip()
-    return jsonify(out)
+    nvr = dict(row); nvr.setdefault("vendor", "dahua")
+    all_osd = _v.fetch_osd_all(nvr, timeout=10)
+    for d in all_osd:
+        if d.get("channel") == channel:
+            return jsonify(d)
+    return jsonify({"channel": channel, "channel_title": None,
+                    "time_title": None, "channel_name": ""})
 
 
 @app.get("/api/nvrs/<int:nid>/osd/all")
@@ -925,8 +914,11 @@ def api_clip():
     # Clip source: 'fastload' = tải trực tiếp .dav từ NVR (nhanh ~2×),
     # chỉ áp dụng mode=playback. Nếu fail → fallback RTSP.
     src = (data.get("source") or nvr.get("clip_source") or "rtsp").lower()
+    # Fastload chỉ áp dụng cho Dahua (loadfile.cgi). Hikvision không có
+    # equivalent → force RTSP playback path.
     use_fastload = (src == "fastload" and mode == "playback"
-                    and start_raw and end_raw)
+                    and start_raw and end_raw
+                    and (nvr.get("vendor", "dahua") == "dahua"))
     # Encoder: libx264 (default) / h264_v4l2m2m (HW) / copy (no re-encode)
     encoder = (data.get("encoder") or nvr.get("clip_encoder") or "libx264").lower()
 
