@@ -402,19 +402,22 @@ def cmd_update(silent: bool = False):
     Sau khi swap xong, restart 3 service task — Task Scheduler tự launch lại
     qua .exe path, process cũ chết, process mới dùng binary mới.
     silent=True: không print + không fail nếu đã latest (dùng cho cron)."""
-    import json, urllib.request
+    # Dùng `requests` thay `urllib.request` vì PyInstaller onefile không
+    # bundle Windows system CA store → urllib.request báo
+    # CERTIFICATE_VERIFY_FAILED. requests tự dùng certifi CA (được bundle).
+    import requests
 
     def say(msg):
         if not silent:
             print(msg)
 
+    headers = {"User-Agent": "pitailscale-updater"}
     say(f"» current: build-{BUILD_NUMBER}")
     say(f"» checking {UPDATE_API}")
     try:
-        req = urllib.request.Request(UPDATE_API,
-                                     headers={"User-Agent": "pitailscale-updater"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            rel = json.load(r)
+        r = requests.get(UPDATE_API, headers=headers, timeout=15)
+        r.raise_for_status()
+        rel = r.json()
     except Exception as e:
         say(f"✗ API fetch fail: {e}")
         return 1
@@ -442,13 +445,12 @@ def cmd_update(silent: bool = False):
     old = me.with_name(me.stem + ".old" + me.suffix)
 
     try:
-        req = urllib.request.Request(url,
-                                     headers={"User-Agent": "pitailscale-updater"})
-        with urllib.request.urlopen(req, timeout=300) as r, open(tmp, "wb") as f:
-            while True:
-                chunk = r.read(1024 * 1024)
-                if not chunk: break
-                f.write(chunk)
+        with requests.get(url, headers=headers, stream=True, timeout=300) as rr:
+            rr.raise_for_status()
+            with open(tmp, "wb") as f:
+                for chunk in rr.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
     except Exception as e:
         try: tmp.unlink()
         except Exception: pass
