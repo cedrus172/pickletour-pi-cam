@@ -32,6 +32,36 @@ _HIK_NS2 = "{http://www.hikvision.com/ver10/XMLSchema}"
 requests.packages.urllib3.disable_warnings()  # self-signed OK
 
 
+def _hfind(parent, tag):
+    """Hik XML namespace-aware find. CẢNH BÁO: KHÔNG dùng `a or b` với ET
+    Element — leaf element (<model>X</model>) evaluate FALSE vì len(el)==0.
+    Phải so sánh is None explicit."""
+    if parent is None:
+        return None
+    el = parent.find(_HIK_NS + tag)
+    if el is None:
+        el = parent.find(_HIK_NS2 + tag)
+    if el is None:
+        el = parent.find(tag)  # fallback không namespace
+    return el
+
+
+def _htext(parent, tag, default=""):
+    el = _hfind(parent, tag)
+    if el is None or el.text is None:
+        return default
+    return el.text
+
+
+def _hfindall(parent, tag):
+    """findall với namespace, kết hợp 2 namespace."""
+    if parent is None:
+        return []
+    out = parent.findall(_HIK_NS + tag)
+    out += parent.findall(_HIK_NS2 + tag)
+    return out
+
+
 def vendor_of(nvr: dict) -> str:
     v = (nvr.get("vendor") or "dahua").lower().strip()
     if v in ("hik", "hikvision"):
@@ -159,9 +189,9 @@ def _hik_device_info(nvr: dict, timeout: float) -> dict:
         info = {"vendor_detected": "hikvision"}
         for tag in ("deviceName", "model", "serialNumber", "firmwareVersion",
                     "deviceType", "manufacturer"):
-            el = root.find(_HIK_NS + tag) or root.find(_HIK_NS2 + tag)
-            if el is not None and el.text:
-                info[tag] = el.text
+            v = _htext(root, tag)
+            if v:
+                info[tag] = v
         return {"ok": True, "info": f"{info.get('model', '')} fw {info.get('firmwareVersion', '')}",
                 **info}
     except ET.ParseError as e:
@@ -206,9 +236,9 @@ def _hik_list_channels(nvr: dict, timeout: float) -> list:
     """Hik NVR: GET /ISAPI/ContentMgmt/InputProxy/channels. DVR fallback:
     /ISAPI/System/Video/inputs/channels. Trả [{channel, title}]."""
     out = []
-    for path, tag_list, name_tag in (
-        ("/ISAPI/ContentMgmt/InputProxy/channels", ("InputProxyChannel",), "name"),
-        ("/ISAPI/System/Video/inputs/channels", ("VideoInputChannel",), "name"),
+    for path, tag in (
+        ("/ISAPI/ContentMgmt/InputProxy/channels", "InputProxyChannel"),
+        ("/ISAPI/System/Video/inputs/channels", "VideoInputChannel"),
     ):
         url = f"http://{nvr['host']}{path}"
         try:
@@ -217,15 +247,15 @@ def _hik_list_channels(nvr: dict, timeout: float) -> list:
             if r.status_code != 200:
                 continue
             root = ET.fromstring(r.text)
-            for tag in tag_list:
-                for el in root.findall(_HIK_NS + tag) + root.findall(_HIK_NS2 + tag):
-                    id_el = el.find(_HIK_NS + "id") or el.find(_HIK_NS2 + "id")
-                    name_el = el.find(_HIK_NS + name_tag) or el.find(_HIK_NS2 + name_tag)
-                    if id_el is not None and id_el.text:
-                        out.append({
-                            "channel": int(id_el.text),
-                            "title": (name_el.text if name_el is not None and name_el.text else "").strip(),
-                        })
+            for el in _hfindall(root, tag):
+                id_text = _htext(el, "id")
+                if not id_text:
+                    continue
+                try:
+                    cid = int(id_text)
+                except ValueError:
+                    continue
+                out.append({"channel": cid, "title": _htext(el, "name").strip()})
             if out:
                 return out
         except Exception:
@@ -317,18 +347,16 @@ def _hik_fetch_overlay(nvr: dict, channel: int, timeout: float) -> dict:
     except Exception:
         return out
     # channelNameOverlay/enabled
-    ch_el = root.find(_HIK_NS + "channelNameOverlay") or root.find(_HIK_NS2 + "channelNameOverlay")
-    if ch_el is not None:
-        en = ch_el.find(_HIK_NS + "enabled") or ch_el.find(_HIK_NS2 + "enabled")
-        if en is not None and en.text:
-            out["channel_title_on"] = en.text.lower() == "true"
+    ch_el = _hfind(root, "channelNameOverlay")
+    en_text = _htext(ch_el, "enabled")
+    if en_text:
+        out["channel_title_on"] = en_text.lower() == "true"
     # DateTimeOverlay/enabled
-    dt_el = root.find(_HIK_NS + "DateTimeOverlay") or root.find(_HIK_NS2 + "DateTimeOverlay")
-    if dt_el is not None:
-        en = dt_el.find(_HIK_NS + "enabled") or dt_el.find(_HIK_NS2 + "enabled")
-        if en is not None and en.text:
-            out["datetime_on"] = en.text.lower() == "true"
-    # Channel name từ /ISAPI/System/Video/inputs/channels/{ch}/name
+    dt_el = _hfind(root, "DateTimeOverlay")
+    en_text = _htext(dt_el, "enabled")
+    if en_text:
+        out["datetime_on"] = en_text.lower() == "true"
+    # Channel name từ /ISAPI/System/Video/inputs/channels/{ch} (input chan tag)
     try:
         r2 = requests.get(
             f"http://{nvr['host']}/ISAPI/System/Video/inputs/channels/{channel}",
@@ -336,9 +364,7 @@ def _hik_fetch_overlay(nvr: dict, channel: int, timeout: float) -> dict:
             timeout=timeout, verify=False)
         if r2.status_code == 200:
             r2_root = ET.fromstring(r2.text)
-            n = r2_root.find(_HIK_NS + "name") or r2_root.find(_HIK_NS2 + "name")
-            if n is not None and n.text:
-                out["channel_name"] = n.text
+            out["channel_name"] = _htext(r2_root, "name")
     except Exception:
         pass
     return out
@@ -613,23 +639,22 @@ def _hik_get_encode(nvr: dict, channel: int, timeout: float) -> dict:
             root = ET.fromstring(r.text)
         except Exception:
             continue
-
-        def _find(tag):
-            el = root.find(f".//{_HIK_NS}{tag}") or root.find(f".//{_HIK_NS2}{tag}")
-            return el.text if el is not None else ""
-
-        vid = root.find(f".//{_HIK_NS}Video") or root.find(f".//{_HIK_NS2}Video")
-        if vid is not None:
-            def _vf(tag):
-                el = vid.find(_HIK_NS + tag) or vid.find(_HIK_NS2 + tag)
-                return el.text if el is not None and el.text else ""
-            w = _vf("videoResolutionWidth")
-            h = _vf("videoResolutionHeight")
-            out[bucket] = {
-                "codec": _vf("videoCodecType"),
-                "resolution": f"{w}x{h}" if w and h else "",
-                "fps": str(int(_vf("maxFrameRate") or 0) // 100) if _vf("maxFrameRate") else "",
-                "bitrate": _vf("constantBitRate") or _vf("vbrUpperCap"),
-                "mode": _vf("videoQualityControlType"),
-            }
+        # Video element là child trực tiếp của StreamingChannel
+        vid = _hfind(root, "Video")
+        if vid is None:
+            continue
+        w = _htext(vid, "videoResolutionWidth")
+        h = _htext(vid, "videoResolutionHeight")
+        fps_raw = _htext(vid, "maxFrameRate")
+        try:
+            fps_int = int(fps_raw) // 100 if fps_raw else 0
+        except ValueError:
+            fps_int = 0
+        out[bucket] = {
+            "codec": _htext(vid, "videoCodecType"),
+            "resolution": f"{w}x{h}" if w and h else "",
+            "fps": str(fps_int) if fps_int else "",
+            "bitrate": _htext(vid, "constantBitRate") or _htext(vid, "vbrUpperCap"),
+            "mode": _htext(vid, "videoQualityControlType"),
+        }
     return out
