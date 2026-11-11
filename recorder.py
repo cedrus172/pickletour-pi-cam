@@ -532,9 +532,19 @@ def api_stream_start():
 
     with _db() as conn:
         row = conn.execute("SELECT * FROM nvrs WHERE id=?", (nid,)).fetchone()
-    if not row:
-        return jsonify({"error": "nvr not found"}), 404
-    nvr = dict(row)
+        if not row:
+            return jsonify({"error": "nvr not found"}), 404
+        nvr = dict(row)
+        # Merge per-channel cam direct settings (Hik proxy). Khi có
+        # camera_host, _rtsp_url sẽ stream TRỰC TIẾP từ IP cam, bypass NVR.
+        ch_row = conn.execute(
+            "SELECT camera_host, camera_user, camera_password "
+            "FROM channels WHERE nvr_id=? AND channel=?",
+            (nid, channel)).fetchone()
+    if ch_row and ch_row["camera_host"]:
+        nvr["camera_host"] = ch_row["camera_host"]
+        nvr["camera_user"] = ch_row["camera_user"] or ""
+        nvr["camera_password"] = ch_row["camera_password"] or ""
 
     _cleanup_old_sessions()
     sid = uuid.uuid4().hex[:12]
@@ -896,9 +906,19 @@ def api_clip():
 
     with _db() as conn:
         row = conn.execute("SELECT * FROM nvrs WHERE id=?", (nid,)).fetchone()
-    if not row:
-        return jsonify({"error": "nvr not found"}), 404
-    nvr = dict(row)
+        if not row:
+            return jsonify({"error": "nvr not found"}), 404
+        nvr = dict(row)
+        # Merge per-channel cam direct settings (Hik proxy)
+        ch_row = conn.execute(
+            "SELECT camera_host, camera_user, camera_password "
+            "FROM channels WHERE nvr_id=? AND channel=?",
+            (nid, channel)).fetchone()
+    if ch_row and ch_row["camera_host"] and mode == "live":
+        # Live: dùng direct cam. Playback: NVR giữ data → vẫn qua NVR.
+        nvr["camera_host"] = ch_row["camera_host"]
+        nvr["camera_user"] = ch_row["camera_user"] or ""
+        nvr["camera_password"] = ch_row["camera_password"] or ""
     rtsp = _rtsp_url(nvr, channel, mode, start, end, subtype)
 
     # Per-clip override, else NVR default, else none
