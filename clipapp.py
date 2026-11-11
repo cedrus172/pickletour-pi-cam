@@ -22,10 +22,22 @@ app = Flask(__name__, template_folder=str(BASE_DIR / "templates"),
 # Cache-busting: a token that changes each time the service restarts
 STATIC_VER = str(int(time.time()))
 
+# Build label (xem recorder.py cho logic)
+try:
+    from build_info import BUILD_NUMBER as _BV
+    BUILD_LABEL = f"build-{_BV}"
+except Exception:
+    BUILD_LABEL = "dev"
+
 
 @app.context_processor
 def inject_static_ver():
-    return {"ver": STATIC_VER}
+    return {"ver": STATIC_VER, "build_label": BUILD_LABEL}
+
+
+@app.get("/api/version")
+def api_version():
+    return jsonify({"build": BUILD_LABEL})
 
 
 @app.after_request

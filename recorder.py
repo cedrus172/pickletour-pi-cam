@@ -33,6 +33,26 @@ THUMB_TTL = 60  # seconds
 app = Flask(__name__, template_folder=str(BASE_DIR / "templates"),
             static_folder=str(BASE_DIR / "static"))
 
+
+# Build version: Windows CI ghi win/build_info.py với BUILD_NUMBER từ
+# github.run_number. Pi deploy ghi /opt/pitailscale/build_info.py với
+# git commit SHA. Dev local không có → 'dev'.
+try:
+    from build_info import BUILD_NUMBER as _BV
+    BUILD_LABEL = f"build-{_BV}"
+except Exception:
+    BUILD_LABEL = "dev"
+
+
+@app.context_processor
+def _inject_build_label():
+    return {"build_label": BUILD_LABEL}
+
+
+@app.get("/api/version")
+def api_version():
+    return jsonify({"build": BUILD_LABEL})
+
 # session_id -> {"pid": int, "dir": Path, "started": float, "last_access": float, "nvr_id": int}
 _sessions: dict = {}
 _sessions_lock = threading.Lock()
