@@ -723,6 +723,127 @@ def fast_clip_hik(nvr: dict, channel: int, start_human: str, end_human: str,
 
 
 # ============================================================================
+# SYSTEM OPS — Hikvision (dashboard: info, time, reboot, storage)
+# ============================================================================
+def system_info_hik(nvr: dict, timeout: float = 8.0) -> dict:
+    """Trả {ok, device_type, serial, firmware, nvr_time, pi_time, drift_seconds}."""
+    from datetime import datetime
+    import xml.etree.ElementTree as ET
+    out = {"ok": False, "nvr_time": "", "drift_seconds": None,
+           "pi_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    try:
+        r = requests.get(f"http://{nvr['host']}/ISAPI/System/deviceInfo",
+                         auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                         timeout=timeout, verify=False)
+        if r.status_code != 200:
+            return {**out, "error": f"deviceInfo HTTP {r.status_code}"}
+        root = ET.fromstring(r.text)
+        out["device_type"] = _htext(root, "deviceType")
+        out["serial"] = _htext(root, "serialNumber")
+        out["firmware"] = _htext(root, "firmwareVersion")
+        out["processor"] = _htext(root, "model")
+    except Exception as e:
+        return {**out, "error": f"deviceInfo: {e}"}
+    # Time
+    try:
+        r = requests.get(f"http://{nvr['host']}/ISAPI/System/time",
+                         auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                         timeout=timeout, verify=False)
+        if r.status_code == 200:
+            root = ET.fromstring(r.text)
+            local = _htext(root, "localTime")
+            if local:
+                # Format: 2026-11-11T12:00:00+07:00 → strip tz
+                local_clean = local.split("+")[0].split("Z")[0].replace("T", " ")
+                out["nvr_time"] = local_clean
+                try:
+                    nvr_dt = datetime.strptime(local_clean, "%Y-%m-%d %H:%M:%S")
+                    out["drift_seconds"] = int((datetime.now() - nvr_dt).total_seconds())
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    out["ok"] = True
+    return out
+
+
+def sync_time_hik(nvr: dict, timeout: float = 10.0) -> dict:
+    """Set NVR time về giờ Pi hiện tại."""
+    from datetime import datetime
+    now = datetime.now()
+    # Hik yêu cầu ISO 8601 local time (không UTC)
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S") + "+07:00"
+    body = (f'<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<Time version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">\n'
+            f'  <timeMode>manual</timeMode>\n'
+            f'  <localTime>{now_iso}</localTime>\n'
+            f'  <timeZone>CST-7:00:00</timeZone>\n'
+            f'</Time>\n')
+    try:
+        r = requests.put(f"http://{nvr['host']}/ISAPI/System/time",
+                         data=body.encode("utf-8"),
+                         headers={"Content-Type": "application/xml"},
+                         auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                         timeout=timeout, verify=False)
+        return {"ok": r.status_code in (200, 201),
+                "status": r.status_code,
+                "set_to": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "resp": r.text[:200]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def reboot_hik(nvr: dict, timeout: float = 5.0) -> dict:
+    """Reboot NVR qua ISAPI. Thường drop connection trước khi trả → treat OK."""
+    try:
+        r = requests.put(f"http://{nvr['host']}/ISAPI/System/reboot",
+                         auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                         timeout=timeout, verify=False)
+        return {"ok": r.status_code in (200, 201),
+                "status": r.status_code, "resp": r.text[:200]}
+    except Exception as e:
+        return {"ok": True,
+                "note": f"NVR đã nhận lệnh (connection dropped: {e})"}
+
+
+def storage_hik(nvr: dict, timeout: float = 10.0) -> dict:
+    """Thông tin HDD. Trả {ok, disks: [{index, name, state, healthy, total_gb,
+    used_gb, used_pct}]}. Hik endpoint: /ISAPI/ContentMgmt/Storage."""
+    import xml.etree.ElementTree as ET
+    try:
+        r = requests.get(f"http://{nvr['host']}/ISAPI/ContentMgmt/Storage",
+                         auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                         timeout=timeout, verify=False)
+        if r.status_code != 200:
+            return {"ok": False, "error": f"HTTP {r.status_code}"}
+        root = ET.fromstring(r.text)
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    disks = []
+    # hddList/hdd/*
+    hdd_list = _hfind(root, "hddList")
+    if hdd_list is not None:
+        for hdd in _hfindall(hdd_list, "hdd"):
+            try:
+                cap_mb = int(_htext(hdd, "capacity") or 0)
+                free_mb = int(_htext(hdd, "freeSpace") or 0)
+            except ValueError:
+                cap_mb, free_mb = 0, 0
+            used_mb = cap_mb - free_mb
+            disks.append({
+                "index": int(_htext(hdd, "id") or 0),
+                "name": _htext(hdd, "hddName") or "HDD",
+                "state": _htext(hdd, "status") or "",
+                "healthy": (_htext(hdd, "status") or "").lower() in ("ok", "formatted", "normal"),
+                "total_gb": round(cap_mb / 1024, 1),
+                "used_gb": round(used_mb / 1024, 1),
+                "used_pct": round((used_mb / cap_mb * 100), 1) if cap_mb else 0,
+                "partitions": 1,
+            })
+    return {"ok": True, "disks": disks}
+
+
+# ============================================================================
 # ENCODE INFO — vendor dispatch
 # ============================================================================
 def get_encode_info(nvr: dict, channel: int, timeout: float = 10.0) -> dict:
