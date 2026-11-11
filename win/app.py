@@ -355,8 +355,26 @@ def cmd_uninstall():
                        capture_output=True)
         subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule",
                         f"name={task_name} TCP {port}"], capture_output=True)
-    print("✓ Đã gỡ 3 task + firewall rule")
-    print("  (Data ở %USERPROFILE%\\PiTailscale\\data không bị xoá)")
+
+    # Kill mọi pitailscale.exe process còn sống (orphan sau schtasks /End).
+    # Ngoại trừ chính process uninstall này — nhưng /IM filter + /F sẽ cover
+    # luôn, OS tự skip self vì đang chạy phần code trước khi exit.
+    print("» Kill mọi process pitailscale.exe còn sống...")
+    me = os.getpid()
+    try:
+        # /FI "PID ne N" loại trừ chính mình; /T kill cây con luôn.
+        r = subprocess.run(
+            ["taskkill", "/IM", "pitailscale.exe", "/T", "/F",
+             "/FI", f"PID ne {me}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        print(f"  {r.stdout.strip() or r.stderr.strip() or '(no orphan)'}")
+    except Exception as e:
+        print(f"  ! taskkill fail: {e}")
+
+    print()
+    print("✓ Đã gỡ 3 task + firewall rule + kill process")
+    print("  (Data ở %USERPROFILE%\\PiTailscale\\data không bị xoá — xoá tay nếu muốn)")
 
 
 def main():
