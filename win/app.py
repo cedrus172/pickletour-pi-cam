@@ -350,19 +350,21 @@ def cmd_install():
         subprocess.run(["schtasks", "/Run", "/TN", task_name], capture_output=True)
         print(f"  ✓ Started")
 
-    # Auto-update task: chạy 3h sáng mỗi ngày, silent mode
+    # Auto-update task: chạy mỗi khi PC bật (ONSTART), delay 1 phút cho
+    # 3 service khởi động + Tailscale lên mạng trước. Tránh chạy 3h sáng
+    # vì khách thường tắt PC qua đêm → không bao giờ check update được.
     print()
-    print(f"» [updater] đăng ký auto-update daily 03:00...")
+    print(f"» [updater] đăng ký auto-update on boot (delay 1 phút)...")
     subprocess.run(["schtasks", "/Delete", "/TN", UPDATER_TASK, "/F"],
                    capture_output=True)
     r = subprocess.run([
         "schtasks", "/Create", "/TN", UPDATER_TASK,
         "/TR", f'{exe} --update-silent',
-        "/SC", "DAILY", "/ST", "03:00",
+        "/SC", "ONSTART", "/DELAY", "0001:00",
         "/RU", "SYSTEM", "/RL", "HIGHEST", "/F",
     ], capture_output=True, text=True)
     if r.returncode == 0:
-        print(f"  ✓ Task '{UPDATER_TASK}' created (daily 03:00)")
+        print(f"  ✓ Task '{UPDATER_TASK}' created (on boot + 1min)")
     else:
         print(f"  ! updater schtasks fail: {r.stderr.strip()}")
 
