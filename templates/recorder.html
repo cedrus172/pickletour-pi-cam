@@ -190,13 +190,13 @@
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
       <b style="color:var(--accent)">Scan sân (channel) từ NVR</b>
       <div style="display:flex;gap:4px">
-        <button class="btn small" id="n-scan">📡 Dahua</button>
+        <button class="btn small primary" id="n-scan">📡 Scan NVR</button>
         <button class="btn small" id="n-scan-onvif">📡 ONVIF</button>
       </div>
     </div>
     <small id="n-scan-hint" style="color:var(--muted);font-size:11px;display:block">
-      "Dahua" = CGI ChannelTitle (nhanh, chuẩn). "ONVIF" = fallback cho NVR hãng khác
-      (Hikvision, Imou, generic) — nhớ enable ONVIF trong NVR trước.
+      "Scan NVR" = gọi API theo HÃNG đã chọn ở trên (Dahua ChannelTitle / Hik ISAPI InputProxy).
+      "ONVIF" = fallback cho NVR hãng khác lạ — nhớ enable ONVIF trong NVR trước.
     </small>
     <div id="n-scan-result" style="margin-top:10px;display:none;max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
       <table>
