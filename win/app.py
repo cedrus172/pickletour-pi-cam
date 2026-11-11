@@ -478,12 +478,21 @@ def cmd_update(silent: bool = False):
         return 4
 
     # Restart 3 service. Task Scheduler sẽ launch .exe mới (cùng path).
-    # Process updater này tự chết sau khi return (Windows không kill
-    # runaway rename-ed exe process).
-    say(f"» restart 3 service task...")
+    # CHÚ Ý: schtasks /End chỉ đánh dấu task kết thúc, KHÔNG kill process con
+    # đã spawn. Process cũ (đang nắm _MEI extract của .old.exe) vẫn sống,
+    # chiếm port 9999/9997/9996 → process mới /Run xong bind fail, chết luôn
+    # → user vẫn thấy UI cũ. Phải taskkill trước.
+    say(f"» stop 3 service task + kill orphan process...")
     for mode, (_fn, _port, task_name, _desc) in MODES.items():
         subprocess.run(["schtasks", "/End", "/TN", task_name], capture_output=True)
-    time.sleep(1)
+    me_pid = os.getpid()
+    subprocess.run(
+        ["taskkill", "/IM", "pitailscale.exe", "/T", "/F",
+         "/FI", f"PID ne {me_pid}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    time.sleep(2)
+    say(f"» start 3 service task với binary mới...")
     for mode, (_fn, _port, task_name, _desc) in MODES.items():
         subprocess.run(["schtasks", "/Run", "/TN", task_name], capture_output=True)
 
