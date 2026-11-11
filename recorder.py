@@ -79,6 +79,9 @@ def _db():
         # 'h264_v4l2m2m' = HW encode trên Pi 4 VPU (nhanh 3-5×, có thể fail nếu firmware chưa setup)
         # 'copy' = không re-encode, nhanh nhất (nhưng KHÔNG BAKE được watermark)
         conn.execute("ALTER TABLE nvrs ADD COLUMN clip_encoder TEXT DEFAULT 'libx264'")
+    if "vendor" not in cols:
+        # 'dahua' | 'hikvision' — chọn API backend
+        conn.execute("ALTER TABLE nvrs ADD COLUMN vendor TEXT DEFAULT 'dahua'")
     conn.execute("""CREATE TABLE IF NOT EXISTS channels (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nvr_id INTEGER NOT NULL,
@@ -110,13 +113,8 @@ def _parse_dt(s: str) -> str:
 
 
 def _kill_pid(pid: int) -> None:
-    try:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)
-    except Exception:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except Exception:
-            pass
+    import rec_shared as _rs
+    _rs.kill_pid(pid)
 
 
 # ---------------- NVR CRUD ----------------
@@ -138,12 +136,16 @@ def api_add_nvr():
     for k in ("name", "host", "user", "password"):
         if not data.get(k):
             return jsonify({"error": f"{k} required"}), 400
+    vendor = (data.get("vendor") or "dahua").lower()
+    if vendor not in ("dahua", "hikvision"):
+        vendor = "dahua"
     with _db() as conn:
         cur = conn.execute(
-            "INSERT INTO nvrs (name,host,rtsp_port,user,password,channels,created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO nvrs (name,host,rtsp_port,user,password,channels,vendor,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
             (data["name"], data["host"], int(data.get("rtsp_port", 554)),
-             data["user"], data["password"], int(data.get("channels", 16)), time.time()),
+             data["user"], data["password"], int(data.get("channels", 16)),
+             vendor, time.time()),
         )
         conn.commit()
         nid = cur.lastrowid
@@ -167,7 +169,7 @@ def api_update_nvr(nid):
     int_fields = {"rtsp_port", "channels", "clip_wm_scroll", "clip_wm_size"}
     for k in ("name", "host", "rtsp_port", "user", "password", "channels",
               "clip_watermark", "clip_wm_pos", "clip_wm_scroll", "clip_wm_size",
-              "clip_source", "clip_encoder"):
+              "clip_source", "clip_encoder", "vendor"):
         if k not in data:
             continue
         v = data[k]
@@ -195,19 +197,26 @@ def api_update_nvr(nid):
 
 @app.post("/api/nvrs/<int:nid>/test")
 def api_test_nvr(nid):
+    import vendors as _v
     with _db() as conn:
         row = conn.execute("SELECT * FROM nvrs WHERE id=?", (nid,)).fetchone()
     if not row:
         return jsonify({"ok": False, "error": "nvr not found"}), 404
     nvr = dict(row)
+    nvr.setdefault("vendor", "dahua")
     # TCP connect test
     try:
         with socket.create_connection((nvr["host"], nvr["rtsp_port"]), timeout=5):
             pass
     except Exception as e:
         return jsonify({"ok": False, "error": f"TCP connect fail: {e}"})
-    # ffprobe test
-    url = _rtsp_url(nvr, int(request.args.get("channel", 1)), "live", subtype=1)
+    # 1. Vendor deviceInfo probe (phân biệt rõ cred sai vs network sai)
+    dev = _v.test_connection(nvr, timeout=6)
+    if not dev.get("ok"):
+        return jsonify({"ok": False, "error": f"API probe fail: {dev.get('error', '')}"})
+    # 2. ffprobe RTSP test
+    channel = int(request.args.get("channel", 1))
+    url = _v.rtsp_live(nvr, channel, subtype=1)
     try:
         r = subprocess.run(
             ["ffprobe", "-v", "error", "-rtsp_transport", "tcp",
@@ -216,7 +225,9 @@ def api_test_nvr(nid):
             capture_output=True, text=True, timeout=15,
         )
         if r.returncode == 0:
-            return jsonify({"ok": True, "info": r.stdout.strip()})
+            info_lines = [dev.get("info", ""), r.stdout.strip()]
+            return jsonify({"ok": True, "info": " | ".join(x for x in info_lines if x),
+                            "vendor": nvr.get("vendor")})
         return jsonify({"ok": False, "error": r.stderr.strip()[:400]})
     except subprocess.TimeoutExpired:
         return jsonify({"ok": False, "error": "ffprobe timeout"})
@@ -226,44 +237,15 @@ def api_test_nvr(nid):
 
 @app.get("/api/nvrs/<int:nid>/encode")
 def api_get_encode(nid):
-    """Fetch Dahua encode config for a channel (main + sub codec)."""
-    import requests
-    from requests.auth import HTTPDigestAuth
-    channel = int(request.args.get("channel", 1)) - 1  # Dahua 0-based
+    """Fetch encode config (codec/resolution/fps/bitrate) — vendor-aware."""
+    import vendors as _v
+    channel = int(request.args.get("channel", 1))
     with _db() as conn:
         row = conn.execute("SELECT * FROM nvrs WHERE id=?", (nid,)).fetchone()
     if not row:
         return jsonify({"error": "nvr not found"}), 404
-    nvr = dict(row)
-    url = f"http://{nvr['host']}/cgi-bin/configManager.cgi?action=getConfig&name=Encode"
-    try:
-        r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
-                         timeout=10, verify=False)
-    except Exception as e:
-        return jsonify({"error": f"request fail: {e}"}), 500
-    if r.status_code != 200:
-        return jsonify({"error": f"HTTP {r.status_code}: {r.text[:200]}"}), 500
-
-    out = {"channel": channel + 1, "main": {}, "sub": {}, "raw_sample": ""}
-    main_keys = {
-        "Compression": "codec",
-        "resolution": "resolution",
-        "Resolution": "resolution",
-        "FPS": "fps",
-        "BitRate": "bitrate",
-        "BitRateControl": "mode",
-    }
-    for line in r.text.splitlines():
-        line = line.strip()
-        for stream_key, bucket in (("MainFormat", "main"), ("ExtraFormat", "sub")):
-            prefix = f"table.Encode[{channel}].{stream_key}[0]."
-            if line.startswith(prefix):
-                k_full, _, v = line[len(prefix):].partition("=")
-                for suffix, short in main_keys.items():
-                    if k_full.endswith(suffix):
-                        out[bucket][short] = v
-                        break
-    return jsonify(out)
+    nvr = dict(row); nvr.setdefault("vendor", "dahua")
+    return jsonify(_v.get_encode_info(nvr, channel, timeout=10))
 
 
 @app.get("/api/nvrs/<int:nid>/osd")
@@ -304,70 +286,26 @@ def api_get_osd(nid):
 
 @app.get("/api/nvrs/<int:nid>/osd/all")
 def api_get_osd_all(nid):
-    """Fetch OSD config cho TẤT CẢ channel của NVR trong 1 call duy nhất
-    (getConfig name=VideoWidget trả cả bảng)."""
-    import requests
-    from requests.auth import HTTPDigestAuth
+    """Fetch OSD config cho TẤT CẢ channel — vendor-aware."""
+    import vendors as _v
     with _db() as conn:
         row = conn.execute("SELECT * FROM nvrs WHERE id=?", (nid,)).fetchone()
     if not row:
         return jsonify({"error": "nvr not found"}), 404
-    nvr = dict(row)
-    url = (f"http://{nvr['host']}/cgi-bin/configManager.cgi"
-           f"?action=getConfig&name=VideoWidget")
+    nvr = dict(row); nvr.setdefault("vendor", "dahua")
     try:
-        r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
-                         timeout=15, verify=False)
+        channels = _v.fetch_osd_all(nvr, timeout=15)
     except Exception as e:
-        return jsonify({"error": f"request fail: {e}"}), 500
-    if r.status_code != 200:
-        return jsonify({"error": f"HTTP {r.status_code}"}), 500
-
-    # table.VideoWidget[N].ChannelTitle.ChannelName=…
-    # table.VideoWidget[N].ChannelTitle.EncodeBlend=true|false
-    # table.VideoWidget[N].TimeTitle.EncodeBlend=true|false
-    rx = re.compile(r"table\.VideoWidget\[(\d+)\]\.(.+?)=(.*)$")
-    out: dict[int, dict] = {}
-    for line in r.text.splitlines():
-        m = rx.match(line.strip())
-        if not m:
-            continue
-        idx = int(m.group(1))
-        key = m.group(2)
-        val = m.group(3).strip()
-        d = out.setdefault(idx, {
-            "channel": idx + 1,
-            "channel_title": None, "time_title": None, "channel_name": ""
-        })
-        if key == "ChannelTitle.EncodeBlend":
-            d["channel_title"] = val.lower() == "true"
-        elif key == "TimeTitle.EncodeBlend":
-            d["time_title"] = val.lower() == "true"
-        elif key == "ChannelTitle.ChannelName":
-            d["channel_name"] = val
-    # Lấy thêm ChannelTitle (tên hiển thị trên UI NVR) làm fallback,
-    # vì ChannelName trong VideoWidget có thể trống khi admin chưa bake tên.
-    try:
-        titles = _dahua_fetch_channel_titles(
-            nvr["host"], nvr["user"], nvr["password"], timeout=8)
-        title_map = {t["channel"]: t["title"] for t in titles}
-    except Exception:
-        title_map = {}
-
-    channels = []
-    for i in sorted(out.keys()):
-        d = out[i]
-        d["display_name"] = d["channel_name"] or title_map.get(d["channel"], "")
-        channels.append(d)
-    return jsonify({"channels": channels, "count": len(channels)})
+        return jsonify({"error": f"fetch_osd_all fail: {e}"}), 500
+    return jsonify({"channels": channels, "count": len(channels),
+                    "vendor": nvr.get("vendor", "dahua")})
 
 
 @app.put("/api/nvrs/<int:nid>/osd/bulk")
 def api_set_osd_bulk(nid):
-    """Gửi nhiều channel OSD updates trong 1 request. Body:
-    {changes: [{channel, channel_title?, time_title?, channel_name?}, ...]}"""
-    import requests, urllib.parse as _up
-    from requests.auth import HTTPDigestAuth
+    """Gửi nhiều channel OSD updates trong 1 request — vendor-aware.
+    Body: {changes: [{channel, channel_title?, time_title?, channel_name?}, ...]}"""
+    import vendors as _v
     data = request.get_json(silent=True) or {}
     changes = data.get("changes") or []
     if not isinstance(changes, list) or not changes:
@@ -376,82 +314,31 @@ def api_set_osd_bulk(nid):
         row = conn.execute("SELECT * FROM nvrs WHERE id=?", (nid,)).fetchone()
     if not row:
         return jsonify({"error": "nvr not found"}), 404
-    nvr = dict(row)
-
-    params = []
-    for item in changes:
-        try:
-            ch = int(item.get("channel", 0)) - 1
-        except Exception:
-            continue
-        if ch < 0:
-            continue
-        if "channel_title" in item:
-            v = "true" if item["channel_title"] else "false"
-            params.append(f"VideoWidget[{ch}].ChannelTitle.EncodeBlend={v}")
-            params.append(f"VideoWidget[{ch}].ChannelTitle.PreviewBlend={v}")
-        if "time_title" in item:
-            v = "true" if item["time_title"] else "false"
-            params.append(f"VideoWidget[{ch}].TimeTitle.EncodeBlend={v}")
-            params.append(f"VideoWidget[{ch}].TimeTitle.PreviewBlend={v}")
-        if item.get("channel_name"):
-            name = _up.quote(str(item["channel_name"]), safe="")
-            params.append(f"VideoWidget[{ch}].ChannelTitle.ChannelName={name}")
-    if not params:
-        return jsonify({"ok": True, "applied": 0}), 200
-
-    encoded = [p.replace("[", "%5B").replace("]", "%5D") for p in params]
-    url = (f"http://{nvr['host']}/cgi-bin/configManager.cgi?action=setConfig&"
-           + "&".join(encoded))
+    nvr = dict(row); nvr.setdefault("vendor", "dahua")
     try:
-        r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
-                         timeout=30, verify=False)
+        result = _v.apply_osd_bulk(nvr, changes, timeout=30)
     except Exception as e:
-        return jsonify({"ok": False, "error": f"request fail: {e}"}), 500
-    body = r.text.strip()
-    ok = r.status_code == 200 and ("OK" in body.upper() or body == "")
-    return jsonify({"ok": ok, "status": r.status_code,
-                    "response": body[:400], "applied": len(changes)})
+        return jsonify({"ok": False, "error": f"apply_osd_bulk fail: {e}"}), 500
+    return jsonify(result)
 
 
 @app.put("/api/nvrs/<int:nid>/osd")
 def api_set_osd(nid):
-    """Toggle Dahua OSD visibility (bake-into-stream) for a channel."""
-    import requests, urllib.parse as _up
-    from requests.auth import HTTPDigestAuth
+    """Single-channel OSD toggle — dispatch qua bulk apply."""
+    import vendors as _v
     data = request.get_json(silent=True) or {}
-    channel = int(data.get("channel", 1)) - 1
     with _db() as conn:
         row = conn.execute("SELECT * FROM nvrs WHERE id=?", (nid,)).fetchone()
     if not row:
         return jsonify({"error": "nvr not found"}), 404
-    nvr = dict(row)
-    params = []
-    if "channel_title" in data:
-        v = "true" if data["channel_title"] else "false"
-        params.append(f"VideoWidget[{channel}].ChannelTitle.EncodeBlend={v}")
-        params.append(f"VideoWidget[{channel}].ChannelTitle.PreviewBlend={v}")
-    if "time_title" in data:
-        v = "true" if data["time_title"] else "false"
-        params.append(f"VideoWidget[{channel}].TimeTitle.EncodeBlend={v}")
-        params.append(f"VideoWidget[{channel}].TimeTitle.PreviewBlend={v}")
-    if "channel_name" in data and data["channel_name"]:
-        name = _up.quote(str(data["channel_name"]), safe="")
-        params.append(f"VideoWidget[{channel}].ChannelTitle.ChannelName={name}")
-    if not params:
+    nvr = dict(row); nvr.setdefault("vendor", "dahua")
+    item = {"channel": int(data.get("channel", 1))}
+    for k in ("channel_title", "time_title", "channel_name"):
+        if k in data:
+            item[k] = data[k]
+    if len(item) == 1:
         return jsonify({"error": "nothing to set"}), 400
-    # URL-encode brackets in each param
-    encoded = [p.replace("[", "%5B").replace("]", "%5D") for p in params]
-    url = (f"http://{nvr['host']}/cgi-bin/configManager.cgi?action=setConfig&"
-           + "&".join(encoded))
-    try:
-        r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
-                         timeout=15, verify=False)
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"request fail: {e}"}), 500
-    body = r.text.strip()
-    ok = r.status_code == 200 and ("OK" in body.upper() or body == "")
-    return jsonify({"ok": ok, "status": r.status_code, "response": body[:300]})
+    return jsonify(_v.apply_osd_bulk(nvr, [item], timeout=15))
 
 
 # ---- Dahua logo (text overlay as watermark) ----
@@ -684,7 +571,8 @@ def api_stream_start():
         str(sdir / "index.m3u8"),
     ]
     with open(log, "ab") as f:
-        p = subprocess.Popen(args, stdout=f, stderr=f, start_new_session=True)
+        import rec_shared as _rs
+        p = _rs.popen_detached(args, stdout=f, stderr=f)
 
     with _sessions_lock:
         _sessions[sid] = {
@@ -1254,16 +1142,20 @@ def _dahua_fetch_channel_titles(host: str, user: str, password: str,
 @app.post("/api/nvrs/scan-channels")
 def api_scan_channels_adhoc():
     """Scan channel titles cho NVR CHƯA được save (nhập host/user/pass raw).
-    Dùng khi tạo mới NVR, trước khi lưu."""
+    Dùng khi tạo mới NVR, trước khi lưu. Vendor-aware."""
+    import vendors as _v
     data = request.get_json(silent=True) or {}
     host = (data.get("host") or "").strip()
     user = (data.get("user") or "").strip()
     pw = data.get("password") or ""
+    vendor = (data.get("vendor") or "dahua").lower()
     if not host or not user or not pw:
         return jsonify({"error": "host, user, password required"}), 400
+    nvr = {"host": host, "user": user, "password": pw, "vendor": vendor,
+           "channels": 16, "rtsp_port": 554}
     try:
-        titles = _dahua_fetch_channel_titles(host, user, pw)
-        return jsonify({"ok": True, "channels": titles})
+        titles = _v.list_channels(nvr, timeout=10)
+        return jsonify({"ok": True, "channels": titles, "vendor": vendor})
     except Exception as e:
         return jsonify({"error": f"NVR không trả lời: {e}"}), 502
 
@@ -1272,16 +1164,17 @@ def api_scan_channels_adhoc():
 def api_scan_channels(nid):
     """Scan channel titles cho NVR đã save (dùng creds trong DB).
     Merge với bảng channels local để biết sân nào đã add."""
+    import vendors as _v
     with _db() as conn:
         row = conn.execute("SELECT * FROM nvrs WHERE id=?", (nid,)).fetchone()
         if not row:
             return jsonify({"error": "nvr not found"}), 404
-        nvr = dict(row)
+        nvr = dict(row); nvr.setdefault("vendor", "dahua")
         existing = {r["channel"]: dict(r) for r in
                     conn.execute("SELECT * FROM channels WHERE nvr_id=?",
                                  (nid,)).fetchall()}
     try:
-        titles = _dahua_fetch_channel_titles(nvr["host"], nvr["user"], nvr["password"])
+        titles = _v.list_channels(nvr, timeout=10)
     except Exception as e:
         return jsonify({"error": f"NVR không trả lời: {e}"}), 502
     for t in titles:
@@ -1290,7 +1183,8 @@ def api_scan_channels(nid):
         t["local_id"] = local["id"] if local else None
         t["local_name"] = local["name"] if local else ""
         t["local_subtype"] = local["subtype"] if local else 0
-    return jsonify({"ok": True, "nvr": nvr["name"], "channels": titles})
+    return jsonify({"ok": True, "nvr": nvr["name"],
+                    "vendor": nvr.get("vendor"), "channels": titles})
 
 
 # ---------------- Dahua operations: system/reboot/storage/image/record ----------------
@@ -1687,7 +1581,7 @@ def _housekeeper():
             from pathlib import Path as _P
             now = time.time()
             ttl = int(os.environ.get("PT_CLIP_TTL_SECS", "10800"))
-            for p in _P("/opt/pitailscale/data/clips").iterdir() if _P("/opt/pitailscale/data/clips").exists() else []:
+            for p in CLIPS_DIR.iterdir() if CLIPS_DIR.exists() else []:
                 try:
                     if (now - p.stat().st_mtime) > ttl:
                         p.unlink()

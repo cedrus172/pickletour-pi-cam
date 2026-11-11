@@ -1,0 +1,635 @@
+"""Vendor abstraction cho NVR backends.
+
+Hỗ trợ:
+- Dahua (CGI: snapshot.cgi, configManager.cgi, loadfile.cgi)
+- Hikvision (ISAPI: /ISAPI/Streaming, /ISAPI/System/Video, /ISAPI/ContentMgmt)
+
+Thiết kế: KHÔNG wrap Dahua trong class — giữ code cũ nguyên. Chỉ thêm:
+  - vendor_of(nvr) → "dahua" | "hikvision"
+  - snapshot_bytes(nvr, ch, timeout) — dispatch
+  - rtsp_live(nvr, ch, subtype) — dispatch
+  - rtsp_playback(nvr, ch, start, end) — dispatch
+  - fetch_osd_all(nvr) — list[dict] vendor-neutral format
+  - apply_osd_bulk(nvr, changes) — áp dụng danh sách thay đổi
+  - fast_clip_hik(...) — Hik playback→MP4 (gọi từ rec_shared.dahua_fast_clip dispatcher)
+  - test_connection(nvr) — probe deviceInfo
+  - list_channels_hik(nvr) — discover channels khi add NVR
+
+Caller (recorder.py, clipapp.py, rec_shared.py) kiểm tra vendor_of(nvr) rồi
+hoặc gọi vào module này, hoặc fallback code Dahua cũ. Rõ ràng, dễ debug.
+"""
+import re
+import urllib.parse
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Optional
+
+import requests
+from requests.auth import HTTPDigestAuth
+
+_HIK_NS = "{http://www.hikvision.com/ver20/XMLSchema}"
+_HIK_NS2 = "{http://www.hikvision.com/ver10/XMLSchema}"
+requests.packages.urllib3.disable_warnings()  # self-signed OK
+
+
+def vendor_of(nvr: dict) -> str:
+    v = (nvr.get("vendor") or "dahua").lower().strip()
+    if v in ("hik", "hikvision"):
+        return "hikvision"
+    return "dahua"
+
+
+# ============================================================================
+# SNAPSHOT (JPEG bytes)
+# ============================================================================
+def snapshot_bytes(nvr: dict, channel: int, timeout: float = 4.0) -> bytes:
+    """Trả 1 JPEG của channel; b'' nếu fail."""
+    if vendor_of(nvr) == "hikvision":
+        return _hik_snapshot_bytes(nvr, channel, timeout)
+    return _dahua_snapshot_bytes(nvr, channel, timeout)
+
+
+def _dahua_snapshot_bytes(nvr: dict, channel: int, timeout: float) -> bytes:
+    url = f"http://{nvr['host']}/cgi-bin/snapshot.cgi?channel={channel}&type=1"
+    try:
+        r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                         timeout=timeout)
+        if r.status_code == 200 and r.content[:3] == b"\xff\xd8\xff":
+            return r.content
+    except Exception:
+        pass
+    return b""
+
+
+def _hik_snapshot_bytes(nvr: dict, channel: int, timeout: float) -> bytes:
+    # Hik: ch 1 → "101" (channel 1, stream 01=main). Sub: "102".
+    for stream_suffix in ("01", "02"):
+        url = (f"http://{nvr['host']}/ISAPI/Streaming/channels/"
+               f"{channel}{stream_suffix}/picture")
+        try:
+            r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                             timeout=timeout)
+            if r.status_code == 200 and r.content[:3] == b"\xff\xd8\xff":
+                return r.content
+        except Exception:
+            continue
+    return b""
+
+
+# ============================================================================
+# RTSP URLs
+# ============================================================================
+def rtsp_live(nvr: dict, channel: int, subtype: int = 0) -> str:
+    user = urllib.parse.quote(nvr["user"], safe="")
+    pw = urllib.parse.quote(nvr["password"], safe="")
+    port = nvr.get("rtsp_port", 554)
+    host = nvr["host"]
+    if vendor_of(nvr) == "hikvision":
+        # Hik: channel 1 → "/Streaming/Channels/101" (main) hoặc "/102" (sub)
+        stream = "02" if subtype else "01"
+        return f"rtsp://{user}:{pw}@{host}:{port}/Streaming/Channels/{channel}{stream}"
+    # Dahua
+    return (f"rtsp://{user}:{pw}@{host}:{port}"
+            f"/cam/realmonitor?channel={channel}&subtype={subtype}")
+
+
+def rtsp_playback(nvr: dict, channel: int, start: str, end: str) -> str:
+    """start/end: cho Dahua = 'YYYY_MM_DD_HH_MM_SS', cho Hik = 'YYYYMMDDTHHMMSSZ'."""
+    user = urllib.parse.quote(nvr["user"], safe="")
+    pw = urllib.parse.quote(nvr["password"], safe="")
+    port = nvr.get("rtsp_port", 554)
+    host = nvr["host"]
+    if vendor_of(nvr) == "hikvision":
+        # Hik playback: /Streaming/tracks/{ch}01?starttime=...Z&endtime=...Z
+        return (f"rtsp://{user}:{pw}@{host}:{port}/Streaming/tracks/{channel}01"
+                f"?starttime={start}&endtime={end}")
+    return (f"rtsp://{user}:{pw}@{host}:{port}"
+            f"/cam/playback?channel={channel}&starttime={start}&endtime={end}")
+
+
+def dahua_time_to_hik(dahua_dt: str) -> str:
+    """'YYYY_MM_DD_HH_MM_SS' → 'YYYYMMDDTHHMMSSZ' (Hik playback format)."""
+    p = [x for x in dahua_dt.split("_") if x]
+    while len(p) < 6:
+        p.append("00")
+    return f"{p[0]}{p[1]}{p[2]}T{p[3]}{p[4]}{p[5]}Z"
+
+
+def human_to_hik(human_dt: str) -> str:
+    """'YYYY-MM-DD HH:MM:SS' → 'YYYYMMDDTHHMMSSZ'."""
+    s = human_dt.strip().replace("T", " ").replace("-", "").replace(":", "")
+    s = s.replace(" ", "T")
+    while len(s.replace("T", "")) < 14:
+        s += "0"
+    return s + "Z"
+
+
+# ============================================================================
+# CONNECTION TEST / DEVICE INFO
+# ============================================================================
+def test_connection(nvr: dict, timeout: float = 8.0) -> dict:
+    """{ok, info|error, vendor_detected, model?, fw?}"""
+    if vendor_of(nvr) == "hikvision":
+        return _hik_device_info(nvr, timeout)
+    return _dahua_device_info(nvr, timeout)
+
+
+def _dahua_device_info(nvr: dict, timeout: float) -> dict:
+    url = f"http://{nvr['host']}/cgi-bin/magicBox.cgi?action=getDeviceType"
+    try:
+        r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                         timeout=timeout, verify=False)
+        if r.status_code == 200 and "type=" in r.text:
+            model = r.text.split("type=", 1)[1].strip().splitlines()[0]
+            return {"ok": True, "vendor_detected": "dahua", "model": model,
+                    "info": r.text.strip()[:200]}
+        return {"ok": False, "error": f"HTTP {r.status_code}: {r.text[:200]}"}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+def _hik_device_info(nvr: dict, timeout: float) -> dict:
+    url = f"http://{nvr['host']}/ISAPI/System/deviceInfo"
+    try:
+        r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                         timeout=timeout, verify=False)
+        if r.status_code != 200:
+            return {"ok": False, "error": f"HTTP {r.status_code}: {r.text[:200]}"}
+        root = ET.fromstring(r.text)
+        info = {"vendor_detected": "hikvision"}
+        for tag in ("deviceName", "model", "serialNumber", "firmwareVersion",
+                    "deviceType", "manufacturer"):
+            el = root.find(_HIK_NS + tag) or root.find(_HIK_NS2 + tag)
+            if el is not None and el.text:
+                info[tag] = el.text
+        return {"ok": True, "info": f"{info.get('model', '')} fw {info.get('firmwareVersion', '')}",
+                **info}
+    except ET.ParseError as e:
+        return {"ok": False, "error": f"XML parse: {e}; body: {r.text[:200]}"}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+# ============================================================================
+# CHANNEL LIST (dùng khi add NVR mới để auto-discover)
+# ============================================================================
+def list_channels(nvr: dict, timeout: float = 10.0) -> list:
+    """Trả list[{channel, name}]. Luôn cố gắng, fail trả []."""
+    if vendor_of(nvr) == "hikvision":
+        return _hik_list_channels(nvr, timeout)
+    return _dahua_list_channel_titles(nvr["host"], nvr["user"], nvr["password"],
+                                      timeout)
+
+
+def _dahua_list_channel_titles(host, user, pw, timeout=10.0) -> list:
+    """Dahua table.ChannelTitle[N].Name=..."""
+    url = (f"http://{host}/cgi-bin/configManager.cgi"
+           f"?action=getConfig&name=ChannelTitle")
+    try:
+        r = requests.get(url, auth=HTTPDigestAuth(user, pw), timeout=timeout,
+                         verify=False)
+        if r.status_code != 200:
+            return []
+        out = []
+        rx = re.compile(r"table\.ChannelTitle\[(\d+)\]\.Name=(.*)")
+        for line in r.text.splitlines():
+            m = rx.match(line.strip())
+            if m:
+                out.append({"channel": int(m.group(1)) + 1,
+                            "title": m.group(2).strip()})
+        return out
+    except Exception:
+        return []
+
+
+def _hik_list_channels(nvr: dict, timeout: float) -> list:
+    """Hik NVR: GET /ISAPI/ContentMgmt/InputProxy/channels. DVR fallback:
+    /ISAPI/System/Video/inputs/channels. Trả [{channel, title}]."""
+    out = []
+    for path, tag_list, name_tag in (
+        ("/ISAPI/ContentMgmt/InputProxy/channels", ("InputProxyChannel",), "name"),
+        ("/ISAPI/System/Video/inputs/channels", ("VideoInputChannel",), "name"),
+    ):
+        url = f"http://{nvr['host']}{path}"
+        try:
+            r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                             timeout=timeout, verify=False)
+            if r.status_code != 200:
+                continue
+            root = ET.fromstring(r.text)
+            for tag in tag_list:
+                for el in root.findall(_HIK_NS + tag) + root.findall(_HIK_NS2 + tag):
+                    id_el = el.find(_HIK_NS + "id") or el.find(_HIK_NS2 + "id")
+                    name_el = el.find(_HIK_NS + name_tag) or el.find(_HIK_NS2 + name_tag)
+                    if id_el is not None and id_el.text:
+                        out.append({
+                            "channel": int(id_el.text),
+                            "title": (name_el.text if name_el is not None and name_el.text else "").strip(),
+                        })
+            if out:
+                return out
+        except Exception:
+            continue
+    return out
+
+
+# ============================================================================
+# OSD — fetch & apply (channel_title, time_title, channel_name)
+# ============================================================================
+def fetch_osd_all(nvr: dict, timeout: float = 15.0) -> list:
+    """Trả list[{channel, channel_title, time_title, channel_name, display_name}]."""
+    if vendor_of(nvr) == "hikvision":
+        return _hik_fetch_osd_all(nvr, timeout)
+    return _dahua_fetch_osd_all(nvr, timeout)
+
+
+def _dahua_fetch_osd_all(nvr: dict, timeout: float) -> list:
+    url = (f"http://{nvr['host']}/cgi-bin/configManager.cgi"
+           f"?action=getConfig&name=VideoWidget")
+    try:
+        r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                         timeout=timeout, verify=False)
+        if r.status_code != 200:
+            return []
+    except Exception:
+        return []
+    rx = re.compile(r"table\.VideoWidget\[(\d+)\]\.(.+?)=(.*)$")
+    out: dict = {}
+    for line in r.text.splitlines():
+        m = rx.match(line.strip())
+        if not m:
+            continue
+        idx = int(m.group(1))
+        key, val = m.group(2), m.group(3).strip()
+        d = out.setdefault(idx, {"channel": idx + 1, "channel_title": None,
+                                 "time_title": None, "channel_name": ""})
+        if key == "ChannelTitle.EncodeBlend":
+            d["channel_title"] = val.lower() == "true"
+        elif key == "TimeTitle.EncodeBlend":
+            d["time_title"] = val.lower() == "true"
+        elif key == "ChannelTitle.ChannelName":
+            d["channel_name"] = val
+    titles = _dahua_list_channel_titles(nvr["host"], nvr["user"], nvr["password"],
+                                        timeout=8)
+    title_map = {t["channel"]: t["title"] for t in titles}
+    res = []
+    for i in sorted(out.keys()):
+        d = out[i]
+        d["display_name"] = d["channel_name"] or title_map.get(d["channel"], "")
+        res.append(d)
+    return res
+
+
+def _hik_fetch_osd_all(nvr: dict, timeout: float) -> list:
+    """Hik: phải gọi /overlays per-channel. Lấy channel list trước."""
+    chans = _hik_list_channels(nvr, timeout)
+    if not chans:
+        # fallback: quét từ 1..nvr.channels
+        chans = [{"channel": c, "title": ""}
+                 for c in range(1, int(nvr.get("channels", 16)) + 1)]
+    name_map = {c["channel"]: c.get("title", "") for c in chans}
+    out = []
+    for c in chans:
+        ch = c["channel"]
+        overlays = _hik_fetch_overlay(nvr, ch, timeout=5)
+        d = {
+            "channel": ch,
+            "channel_title": overlays.get("channel_title_on"),
+            "time_title": overlays.get("datetime_on"),
+            "channel_name": overlays.get("channel_name") or name_map.get(ch, ""),
+            "display_name": overlays.get("channel_name") or name_map.get(ch, ""),
+        }
+        out.append(d)
+    return out
+
+
+def _hik_fetch_overlay(nvr: dict, channel: int, timeout: float) -> dict:
+    """GET /ISAPI/System/Video/inputs/channels/{ch}/overlays → dict."""
+    url = (f"http://{nvr['host']}/ISAPI/System/Video/inputs/channels/"
+           f"{channel}/overlays")
+    out = {"channel_title_on": None, "datetime_on": None, "channel_name": ""}
+    try:
+        r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                         timeout=timeout, verify=False)
+        if r.status_code != 200:
+            return out
+        root = ET.fromstring(r.text)
+    except Exception:
+        return out
+    # channelNameOverlay/enabled
+    ch_el = root.find(_HIK_NS + "channelNameOverlay") or root.find(_HIK_NS2 + "channelNameOverlay")
+    if ch_el is not None:
+        en = ch_el.find(_HIK_NS + "enabled") or ch_el.find(_HIK_NS2 + "enabled")
+        if en is not None and en.text:
+            out["channel_title_on"] = en.text.lower() == "true"
+    # DateTimeOverlay/enabled
+    dt_el = root.find(_HIK_NS + "DateTimeOverlay") or root.find(_HIK_NS2 + "DateTimeOverlay")
+    if dt_el is not None:
+        en = dt_el.find(_HIK_NS + "enabled") or dt_el.find(_HIK_NS2 + "enabled")
+        if en is not None and en.text:
+            out["datetime_on"] = en.text.lower() == "true"
+    # Channel name từ /ISAPI/System/Video/inputs/channels/{ch}/name
+    try:
+        r2 = requests.get(
+            f"http://{nvr['host']}/ISAPI/System/Video/inputs/channels/{channel}",
+            auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+            timeout=timeout, verify=False)
+        if r2.status_code == 200:
+            r2_root = ET.fromstring(r2.text)
+            n = r2_root.find(_HIK_NS + "name") or r2_root.find(_HIK_NS2 + "name")
+            if n is not None and n.text:
+                out["channel_name"] = n.text
+    except Exception:
+        pass
+    return out
+
+
+def apply_osd_bulk(nvr: dict, changes: list, timeout: float = 30.0) -> dict:
+    """changes: list[{channel, channel_title?, time_title?, channel_name?}].
+    Trả {ok, applied, errors: []}."""
+    if vendor_of(nvr) == "hikvision":
+        return _hik_apply_osd_bulk(nvr, changes, timeout)
+    return _dahua_apply_osd_bulk(nvr, changes, timeout)
+
+
+def _dahua_apply_osd_bulk(nvr: dict, changes: list, timeout: float) -> dict:
+    params = []
+    for item in changes:
+        try:
+            ch = int(item.get("channel", 0)) - 1
+        except Exception:
+            continue
+        if ch < 0:
+            continue
+        if "channel_title" in item:
+            v = "true" if item["channel_title"] else "false"
+            params.append(f"VideoWidget[{ch}].ChannelTitle.EncodeBlend={v}")
+            params.append(f"VideoWidget[{ch}].ChannelTitle.PreviewBlend={v}")
+        if "time_title" in item:
+            v = "true" if item["time_title"] else "false"
+            params.append(f"VideoWidget[{ch}].TimeTitle.EncodeBlend={v}")
+            params.append(f"VideoWidget[{ch}].TimeTitle.PreviewBlend={v}")
+        if item.get("channel_name"):
+            name = urllib.parse.quote(str(item["channel_name"]), safe="")
+            params.append(f"VideoWidget[{ch}].ChannelTitle.ChannelName={name}")
+    if not params:
+        return {"ok": True, "applied": 0, "errors": []}
+    encoded = [p.replace("[", "%5B").replace("]", "%5D") for p in params]
+    url = (f"http://{nvr['host']}/cgi-bin/configManager.cgi?action=setConfig&"
+           + "&".join(encoded))
+    try:
+        r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                         timeout=timeout, verify=False)
+    except Exception as e:
+        return {"ok": False, "applied": 0, "errors": [f"request fail: {e}"]}
+    body = r.text.strip()
+    ok = r.status_code == 200 and ("OK" in body.upper() or body == "")
+    return {"ok": ok, "status": r.status_code, "applied": len(changes),
+            "response": body[:400], "errors": [] if ok else [body[:200]]}
+
+
+def _hik_apply_osd_bulk(nvr: dict, changes: list, timeout: float) -> dict:
+    """Hik: per-channel PUT, không batch được. Loop từng channel."""
+    applied = 0
+    errors = []
+    for item in changes:
+        try:
+            ch = int(item.get("channel", 0))
+        except Exception:
+            continue
+        if ch < 1:
+            continue
+        ok, err = _hik_set_channel_osd(nvr, ch, item, timeout)
+        if ok:
+            applied += 1
+        else:
+            errors.append(f"ch{ch}: {err}")
+    return {"ok": not errors, "applied": applied, "errors": errors}
+
+
+def _hik_set_channel_osd(nvr: dict, channel: int, change: dict,
+                         timeout: float) -> tuple:
+    """Modify overlays XML for channel + PUT back. Đổi tên qua endpoint khác."""
+    auth = HTTPDigestAuth(nvr["user"], nvr["password"])
+    host = nvr["host"]
+    # 1. Overlay toggles (channel_title, time_title)
+    if "channel_title" in change or "time_title" in change:
+        url = f"http://{host}/ISAPI/System/Video/inputs/channels/{channel}/overlays"
+        try:
+            r = requests.get(url, auth=auth, timeout=timeout, verify=False)
+            if r.status_code != 200:
+                return False, f"GET overlays HTTP {r.status_code}"
+            # Strip namespace for easier edit
+            xml = r.text
+            if "channel_title" in change:
+                want = "true" if change["channel_title"] else "false"
+                xml = _toggle_xml_block(xml, "channelNameOverlay", want)
+            if "time_title" in change:
+                want = "true" if change["time_title"] else "false"
+                xml = _toggle_xml_block(xml, "DateTimeOverlay", want)
+            # PUT back
+            r = requests.put(url, data=xml.encode("utf-8"),
+                             headers={"Content-Type": "application/xml"},
+                             auth=auth, timeout=timeout, verify=False)
+            if r.status_code not in (200, 201):
+                return False, f"PUT overlays HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as e:
+            return False, f"overlays: {e}"
+    # 2. Channel name
+    if change.get("channel_name"):
+        new_name = str(change["channel_name"])
+        # Thử input channel (DVR) trước
+        url = f"http://{host}/ISAPI/System/Video/inputs/channels/{channel}"
+        try:
+            r = requests.get(url, auth=auth, timeout=timeout, verify=False)
+            if r.status_code == 200 and "<name>" in r.text:
+                xml = re.sub(r"<name>[^<]*</name>",
+                             f"<name>{_xml_escape(new_name)}</name>",
+                             r.text, count=1)
+                r = requests.put(url, data=xml.encode("utf-8"),
+                                 headers={"Content-Type": "application/xml"},
+                                 auth=auth, timeout=timeout, verify=False)
+                if r.status_code not in (200, 201):
+                    return False, f"PUT name HTTP {r.status_code}: {r.text[:200]}"
+            else:
+                # NVR proxy path
+                url2 = f"http://{host}/ISAPI/ContentMgmt/InputProxy/channels/{channel}"
+                r = requests.get(url2, auth=auth, timeout=timeout, verify=False)
+                if r.status_code != 200:
+                    return False, f"GET channel HTTP {r.status_code}"
+                xml = re.sub(r"<name>[^<]*</name>",
+                             f"<name>{_xml_escape(new_name)}</name>",
+                             r.text, count=1)
+                r = requests.put(url2, data=xml.encode("utf-8"),
+                                 headers={"Content-Type": "application/xml"},
+                                 auth=auth, timeout=timeout, verify=False)
+                if r.status_code not in (200, 201):
+                    return False, f"PUT proxy name HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as e:
+            return False, f"name: {e}"
+    return True, ""
+
+
+def _toggle_xml_block(xml: str, block_tag: str, enabled_value: str) -> str:
+    """Trong block <block_tag>...</block_tag>, replace <enabled>...</enabled>."""
+    pattern = re.compile(
+        rf"(<{block_tag}\b[^>]*>.*?<enabled>)[^<]*(</enabled>.*?</{block_tag}>)",
+        re.DOTALL)
+    return pattern.sub(rf"\g<1>{enabled_value}\g<2>", xml, count=1)
+
+
+def _xml_escape(s: str) -> str:
+    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+# ============================================================================
+# FAST CLIP — Hikvision (RTSP playback → MP4 remux)
+# ============================================================================
+def fast_clip_hik(nvr: dict, channel: int, start_human: str, end_human: str,
+                  out_path: Path, progress_cb=None, watermark: str = "",
+                  wm_pos: str = "bl", wm_scroll: int = 0, wm_size: int = 40,
+                  encoder: str = "copy") -> tuple:
+    """Download clip qua Hik RTSP playback + ffmpeg. start_human/end_human:
+    'YYYY-MM-DD HH:MM:SS'. Trả (ok, err_msg).
+
+    Hik không có equivalent 'nhanh' như Dahua loadfile.cgi; dùng RTSP playback
+    + ffmpeg -c copy MP4 vẫn đạt tốc độ ~ realtime từ NVR (LAN speed)."""
+    import subprocess
+    from rec_shared import build_drawtext, encoder_args, _probe_vcodec, _is_hevc
+
+    start = human_to_hik(start_human)
+    end = human_to_hik(end_human)
+    rtsp = rtsp_playback(nvr, channel, start, end)
+
+    log = out_path.with_suffix(".log")
+    drawtext = build_drawtext(watermark, out_path, wm_pos, wm_scroll, wm_size) if watermark else ""
+    enc_args, enc_name = encoder_args(encoder, bool(drawtext))
+
+    args = [
+        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+        "-rtsp_transport", "tcp",
+        "-i", rtsp,
+    ]
+    if drawtext:
+        vf = drawtext if enc_name != "h264_v4l2m2m" else "format=yuv420p," + drawtext
+        args += ["-vf", vf, *enc_args]
+    else:
+        no_wm_args, no_wm_name = encoder_args(encoder or "copy", False)
+        args += [*no_wm_args]
+        enc_name = no_wm_name
+        if no_wm_name == "copy":
+            vcodec = _probe_vcodec(rtsp, rtsp=True)
+            if _is_hevc(vcodec):
+                args += ["-tag:v", "hvc1"]
+    args += [
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        "-y", str(out_path),
+    ]
+    enc_timeout = 1800
+    try:
+        with open(log, "ab") as f:
+            f.write(f"[encoder] {enc_name} [vendor] hikvision\n".encode())
+            p = subprocess.run(args, stdout=f, stderr=f, timeout=enc_timeout)
+        rc = p.returncode
+        if rc != 0 and enc_name == "h264_v4l2m2m":
+            try: out_path.unlink(missing_ok=True)
+            except Exception: pass
+            with open(log, "ab") as f:
+                f.write(b"[fallback] h264_v4l2m2m failed, retrying with libx264\n")
+            fb = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                  "-rtsp_transport", "tcp", "-i", rtsp]
+            if drawtext: fb += ["-vf", drawtext]
+            fb += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                   "-c:a", "aac", "-b:a", "128k",
+                   "-movflags", "+faststart", "-y", str(out_path)]
+            with open(log, "ab") as f:
+                rc = subprocess.run(fb, stdout=f, stderr=f, timeout=1800).returncode
+    except subprocess.TimeoutExpired:
+        if drawtext:
+            try: out_path.with_suffix(".wm.txt").unlink(missing_ok=True)
+            except Exception: pass
+        return False, "clip timeout"
+    finally:
+        if drawtext:
+            try: out_path.with_suffix(".wm.txt").unlink(missing_ok=True)
+            except Exception: pass
+
+    if rc != 0 or not out_path.exists() or out_path.stat().st_size == 0:
+        try: tail = log.read_text()[-400:]
+        except Exception: tail = f"rc={rc}"
+        return False, f"hik clip fail: {tail}"
+    return True, ""
+
+
+# ============================================================================
+# ENCODE INFO — vendor dispatch
+# ============================================================================
+def get_encode_info(nvr: dict, channel: int, timeout: float = 10.0) -> dict:
+    """{channel, main:{codec,resolution,fps,bitrate,mode}, sub:{...}}"""
+    if vendor_of(nvr) == "hikvision":
+        return _hik_get_encode(nvr, channel, timeout)
+    return _dahua_get_encode(nvr, channel, timeout)
+
+
+def _dahua_get_encode(nvr: dict, channel: int, timeout: float) -> dict:
+    url = f"http://{nvr['host']}/cgi-bin/configManager.cgi?action=getConfig&name=Encode"
+    out = {"channel": channel, "main": {}, "sub": {}}
+    try:
+        r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
+                         timeout=timeout, verify=False)
+        if r.status_code != 200:
+            out["error"] = f"HTTP {r.status_code}"
+            return out
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+    ch = channel - 1
+    map_ = {"Compression": "codec", "resolution": "resolution", "Resolution": "resolution",
+            "FPS": "fps", "BitRate": "bitrate", "BitRateControl": "mode"}
+    for line in r.text.splitlines():
+        line = line.strip()
+        for stream_key, bucket in (("MainFormat", "main"), ("ExtraFormat", "sub")):
+            prefix = f"table.Encode[{ch}].{stream_key}[0]."
+            if line.startswith(prefix):
+                k_full, _, v = line[len(prefix):].partition("=")
+                for suffix, short in map_.items():
+                    if k_full.endswith(suffix):
+                        out[bucket][short] = v
+                        break
+    return out
+
+
+def _hik_get_encode(nvr: dict, channel: int, timeout: float) -> dict:
+    """Hik: /ISAPI/Streaming/channels/{ch}01 (main) + {ch}02 (sub)."""
+    auth = HTTPDigestAuth(nvr["user"], nvr["password"])
+    out = {"channel": channel, "main": {}, "sub": {}}
+    for suffix, bucket in (("01", "main"), ("02", "sub")):
+        url = f"http://{nvr['host']}/ISAPI/Streaming/channels/{channel}{suffix}"
+        try:
+            r = requests.get(url, auth=auth, timeout=timeout, verify=False)
+            if r.status_code != 200:
+                continue
+            root = ET.fromstring(r.text)
+        except Exception:
+            continue
+
+        def _find(tag):
+            el = root.find(f".//{_HIK_NS}{tag}") or root.find(f".//{_HIK_NS2}{tag}")
+            return el.text if el is not None else ""
+
+        vid = root.find(f".//{_HIK_NS}Video") or root.find(f".//{_HIK_NS2}Video")
+        if vid is not None:
+            def _vf(tag):
+                el = vid.find(_HIK_NS + tag) or vid.find(_HIK_NS2 + tag)
+                return el.text if el is not None and el.text else ""
+            w = _vf("videoResolutionWidth")
+            h = _vf("videoResolutionHeight")
+            out[bucket] = {
+                "codec": _vf("videoCodecType"),
+                "resolution": f"{w}x{h}" if w and h else "",
+                "fps": str(int(_vf("maxFrameRate") or 0) // 100) if _vf("maxFrameRate") else "",
+                "bitrate": _vf("constantBitRate") or _vf("vbrUpperCap"),
+                "mode": _vf("videoQualityControlType"),
+            }
+    return out

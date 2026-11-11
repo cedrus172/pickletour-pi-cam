@@ -1,18 +1,41 @@
-# PyInstaller spec — onefile build cho Windows
-# Gọi: pyinstaller pitailscale.spec
-# ra: dist/pitailscale.exe
+# PyInstaller spec — onefile multi-mode build cho Windows
+# Build: pyinstaller pitailscale.spec
+# Output: dist/pitailscale.exe (~100MB với ffmpeg bundled)
+#
+# Pre-build (CI làm tự động): copy shared source files + download ffmpeg
+#   - cp ../rec_shared.py ../vendors.py ../recorder.py ../clipapp.py ./
+#   - cp -R ../templates/* templates/   (recorder.html, clip.html)
+#   - cp -R ../static/*     static/     (recorder.js, clip.js, …)
+#   - download ffmpeg + ffprobe → bin/
 
 block_cipher = None
+
+import os
+
+datas = [
+    ('templates', 'templates'),  # gateway index + recorder + clip templates
+    ('static', 'static'),
+]
+binaries = []
+
+# Bundle ffmpeg.exe + ffprobe.exe nếu tồn tại (CI tải sẵn vào bin/)
+for exe in ('ffmpeg.exe', 'ffprobe.exe'):
+    p = os.path.join('bin', exe)
+    if os.path.exists(p):
+        binaries.append((p, 'bin'))
 
 a = Analysis(
     ['app.py'],
     pathex=[],
-    binaries=[],
-    datas=[
-        ('templates', 'templates'),  # Flask template folder (bundled, extract vào _MEIPASS lúc runtime)
-        ('static', 'static'),
+    binaries=binaries,
+    datas=datas,
+    # Flask + Jinja2 + sqlite thường bị auto-detect; liệt kê explicit
+    # để chắc chắn recorder/clip modules load được từ onefile.
+    hiddenimports=[
+        'rec_shared', 'vendors', 'recorder', 'clipapp',
+        'scanner', 'forwarder',
+        'jinja2.ext',
     ],
-    hiddenimports=[],  # PyInstaller tự detect — explicit psutil._psutil_windows gây lỗi khi version mismatch
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -35,14 +58,14 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,         # windows-latest runner không có UPX pre-installed → tắt để không fail
+    upx=False,         # windows-latest runner không có UPX pre-installed
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,      # console mode để user thấy log + install messages
+    console=True,      # user thấy log của recorder/clip/gateway khi chạy
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon='icon.ico',  # bỏ comment khi có file icon.ico trong win/
+    # icon='icon.ico',
 )

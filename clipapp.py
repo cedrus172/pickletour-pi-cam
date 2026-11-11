@@ -176,7 +176,7 @@ def api_stream_start():
         str(sdir / "index.m3u8"),
     ]
     with open(log, "ab") as f:
-        p = subprocess.Popen(args, stdout=f, stderr=f, start_new_session=True)
+        p = rs.popen_detached(args, stdout=f, stderr=f)
 
     with _sessions_lock:
         _sessions[sid] = {
@@ -261,6 +261,8 @@ def _run_clip_bg(clip_id: str, ch: dict, start_str_dahua: str, end_str_dahua: st
         out_path, progress_cb=on_bytes,
         watermark=wm_text, wm_pos=wm_pos, wm_scroll=wm_scroll,
         wm_size=wm_size, encoder=encoder,
+        vendor=ch.get("vendor", "dahua"),
+        rtsp_port=ch.get("rtsp_port", 554),
     )
     if ok:
         with _clips_lock:
@@ -433,7 +435,7 @@ def api_record_start():
     args += ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-y", str(out_path)]
     log = out_path.with_suffix(".log")
     with open(log, "ab") as f:
-        p = subprocess.Popen(args, stdout=f, stderr=f, start_new_session=True)
+        p = rs.popen_detached(args, stdout=f, stderr=f)
     with _clips_lock:
         _clips[rec_id] = {
             "id": rec_id, "path": out_path, "name": fname, "created": time.time(),

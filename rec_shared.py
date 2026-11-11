@@ -1,4 +1,7 @@
-"""Shared helpers between recorder.py (admin) and clipapp.py (public)."""
+"""Shared helpers between recorder.py (admin) and clipapp.py (public).
+
+Cross-platform: chạy cả Pi (Linux) lẫn Windows .exe. Dùng IS_WIN để branch
+các Unix-specific calls (killpg, start_new_session, fontfile paths)."""
 import os
 import signal
 import sqlite3
@@ -7,8 +10,16 @@ import time
 import urllib.parse
 from pathlib import Path
 
+IS_WIN = os.name == "nt"
+
+# Windows mặc định data dir ở %USERPROFILE%\PiTailscale\data
+# Linux/macOS: ./data cạnh file (dev) hoặc PT_DATA_DIR env (prod).
+if IS_WIN:
+    _DEFAULT_DATA = Path.home() / "PiTailscale" / "data"
+else:
+    _DEFAULT_DATA = Path(__file__).resolve().parent / "data"
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path(os.environ.get("PT_DATA_DIR", str(BASE_DIR / "data")))
+DATA_DIR = Path(os.environ.get("PT_DATA_DIR", str(_DEFAULT_DATA)))
 DB_PATH = DATA_DIR / "recorder.db"
 STREAM_DIR = DATA_DIR / "streams"
 CLIPS_DIR = DATA_DIR / "clips"
@@ -59,6 +70,14 @@ def db():
         channels INTEGER NOT NULL DEFAULT 16,
         created_at REAL NOT NULL
     )""")
+    # Vendor migration (dahua|hikvision). Backfill existing rows = dahua.
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(nvrs)").fetchall()}
+        if "vendor" not in cols:
+            conn.execute("ALTER TABLE nvrs ADD COLUMN vendor TEXT DEFAULT 'dahua'")
+            conn.commit()
+    except Exception:
+        pass
     conn.execute("""CREATE TABLE IF NOT EXISTS channels (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nvr_id INTEGER NOT NULL,
@@ -108,12 +127,18 @@ def set_setting(key: str, value: str) -> None:
 
 def rtsp_url(nvr: dict, channel: int, mode: str = "live",
              start: str = "", end: str = "", subtype: int = 0) -> str:
-    user = urllib.parse.quote(nvr["user"], safe="")
-    pw = urllib.parse.quote(nvr["password"], safe="")
-    base = f"rtsp://{user}:{pw}@{nvr['host']}:{nvr['rtsp_port']}"
+    """Vendor-aware RTSP URL. Dahua: /cam/realmonitor,/cam/playback.
+    Hikvision: /Streaming/Channels/{ch}01, /Streaming/tracks/{ch}01."""
+    import vendors as _v
     if mode == "live":
-        return f"{base}/cam/realmonitor?channel={channel}&subtype={subtype}"
-    return f"{base}/cam/playback?channel={channel}&starttime={start}&endtime={end}"
+        return _v.rtsp_live(nvr, channel, subtype)
+    # Playback: cho Hik cần Y/M/D format khác → convert nếu input là Dahua style
+    if _v.vendor_of(nvr) == "hikvision":
+        if "_" in start:
+            start = _v.dahua_time_to_hik(start)
+        if "_" in end:
+            end = _v.dahua_time_to_hik(end)
+    return _v.rtsp_playback(nvr, channel, start, end)
 
 
 def parse_dt(s: str) -> str:
@@ -127,6 +152,14 @@ def parse_dt(s: str) -> str:
 
 
 def kill_pid(pid: int) -> None:
+    """Hard kill. Unix: SIGTERM cả process group. Windows: taskkill /T /F."""
+    if IS_WIN:
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, timeout=5)
+        except Exception:
+            pass
+        return
     try:
         os.killpg(os.getpgid(pid), signal.SIGTERM)
     except Exception:
@@ -137,7 +170,15 @@ def kill_pid(pid: int) -> None:
 
 
 def stop_pid(pid: int) -> None:
-    """Dừng NHẸ (SIGINT) để ffmpeg ghi trailer/faststart xong (clip phát được)."""
+    """Dừng NHẸ (SIGINT) để ffmpeg ghi trailer/faststart xong (clip phát được).
+    Windows: ffmpeg nhận CTRL_BREAK_EVENT khi process được tạo với
+    CREATE_NEW_PROCESS_GROUP (popen_detached đặt sẵn flag)."""
+    if IS_WIN:
+        try:
+            os.kill(pid, signal.CTRL_BREAK_EVENT)
+        except Exception:
+            kill_pid(pid)
+        return
     try:
         os.killpg(os.getpgid(pid), signal.SIGINT)
     except Exception:
@@ -147,7 +188,25 @@ def stop_pid(pid: int) -> None:
             pass
 
 
+def popen_detached(args, stdout=None, stderr=None):
+    """subprocess.Popen cross-platform: Unix start_new_session=True,
+    Windows CREATE_NEW_PROCESS_GROUP (để CTRL_BREAK_EVENT work)."""
+    kw = {"stdout": stdout, "stderr": stderr}
+    if IS_WIN:
+        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True
+    return subprocess.Popen(args, **kw)
+
+
 def pid_alive(pid: int) -> bool:
+    if IS_WIN:
+        try:
+            r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"],
+                               capture_output=True, text=True, timeout=5)
+            return str(pid) in (r.stdout or "")
+        except Exception:
+            return False
     try:
         os.kill(pid, 0)
         return True
@@ -162,6 +221,7 @@ def get_channel(cid: int) -> dict | None:
             row = conn.execute("""
                 SELECT c.*, n.name AS nvr_name, n.host AS nvr_host,
                        n.rtsp_port, n.user, n.password,
+                       COALESCE(n.vendor, 'dahua') AS vendor,
                        COALESCE(n.clip_watermark, '') AS clip_watermark,
                        COALESCE(n.clip_wm_pos, 'bl')  AS clip_wm_pos,
                        COALESCE(n.clip_wm_scroll, 0)  AS clip_wm_scroll,
@@ -186,16 +246,23 @@ def get_channel(cid: int) -> dict | None:
     d.setdefault("clip_wm_scroll", 0)
     d.setdefault("clip_wm_size", 40)
     d.setdefault("clip_encoder", "libx264")
+    d.setdefault("vendor", "dahua")
     return d
 
 
 # -------- Watermark helpers (dùng chung với recorder.py) --------
 from datetime import datetime as _dt
 WM_FONTS = [
+    # Linux
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    # macOS
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    # Windows
+    r"C:\Windows\Fonts\arialbd.ttf",
+    r"C:\Windows\Fonts\arial.ttf",
+    r"C:\Windows\Fonts\segoeuib.ttf",
 ]
 WM_POS = {
     "bl": ("24",       "h-th-24"),
@@ -224,6 +291,15 @@ def render_wm_text(tpl: str, nvr_name: str, channel: int) -> str:
             .replace("{nvr}",      nvr_name))
 
 
+def _ff_path(p) -> str:
+    """ffmpeg drawtext filter cần forward-slash + escape colon trên Windows."""
+    s = str(p).replace("\\", "/")
+    # Windows: "C:/..." → ffmpeg parse "C:" là filter token; escape colon.
+    if IS_WIN and len(s) > 2 and s[1] == ":":
+        s = s[0] + "\\:" + s[2:]
+    return s
+
+
 def build_drawtext(text: str, out_path: Path,
                    wm_pos: str = "bl", wm_scroll: int = 0,
                    wm_size: int = 40, font: str = "") -> str:
@@ -241,8 +317,8 @@ def build_drawtext(text: str, out_path: Path,
     else:
         x_expr, y_expr = WM_POS.get(wm_pos, WM_POS["bl"])
     return (
-        f"drawtext=fontfile={font}"
-        f":textfile={wm_txt_path}"
+        f"drawtext=fontfile={_ff_path(font)}"
+        f":textfile={_ff_path(wm_txt_path)}"
         f":reload=0"
         f":fontcolor=white"
         f":fontsize=h/{size_div}"
@@ -269,16 +345,19 @@ def encoder_args(encoder: str, has_watermark: bool) -> tuple[list[str], str]:
 def channel_rtsp(ch: dict, mode: str, start: str = "", end: str = "",
                  subtype: int = -1) -> str:
     nvr = {"host": ch["nvr_host"], "rtsp_port": ch["rtsp_port"],
-           "user": ch["user"], "password": ch["password"]}
+           "user": ch["user"], "password": ch["password"],
+           "vendor": ch.get("vendor", "dahua")}
     if subtype < 0:
         subtype = ch.get("subtype", 0)
     return rtsp_url(nvr, ch["channel"], mode, start, end, subtype)
 
 
-def _probe_vcodec(src, rtsp: bool = False) -> str:
+def _probe_vcodec(src, rtsp: bool = False, fmt: str = "") -> str:
     """Tên codec video stream đầu tiên ('hevc'/'h264'/…), '' nếu lỗi."""
     args = ["ffprobe", "-v", "error", "-select_streams", "v:0",
             "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1"]
+    if fmt:
+        args += ["-f", fmt]
     if rtsp:
         args += ["-rtsp_transport", "tcp", "-analyzeduration", "3000000", "-probesize", "3000000"]
     args += [str(src)]
@@ -335,7 +414,7 @@ def run_clip_sync(rtsp: str, duration: int, out_path: Path,
     try:
         with open(log, "ab") as f:
             f.write(f"[encoder] {enc_name}\n".encode())
-            p = subprocess.Popen(args, stdout=f, stderr=f, start_new_session=True)
+            p = popen_detached(args, stdout=f, stderr=f)
         try:
             rc = p.wait(timeout=1200)
         except subprocess.TimeoutExpired:
@@ -379,9 +458,21 @@ def dahua_fast_clip(nvr_host: str, user: str, password: str,
                     out_path: Path, progress_cb=None,
                     watermark: str = "", wm_pos: str = "bl",
                     wm_scroll: int = 0, wm_size: int = 40,
-                    encoder: str = "copy") -> tuple[bool, str]:
-    """Download via Dahua loadfile.cgi (network speed) + remux to MP4.
-    start_str/end_str: 'YYYY-MM-DD HH:MM:SS'. progress_cb(bytes) called periodically."""
+                    encoder: str = "copy",
+                    vendor: str = "dahua",
+                    rtsp_port: int = 554) -> tuple[bool, str]:
+    """Vendor-aware fast clip extraction.
+    Dahua: loadfile.cgi binary stream + ffmpeg remux (very fast, LAN speed).
+    Hikvision: RTSP playback /Streaming/tracks/{ch}01?start=...&end=... (~realtime).
+    start_str/end_str: 'YYYY-MM-DD HH:MM:SS'."""
+    if (vendor or "").lower() in ("hikvision", "hik"):
+        import vendors as _v
+        nvr = {"host": nvr_host, "user": user, "password": password,
+               "vendor": "hikvision", "rtsp_port": rtsp_port}
+        return _v.fast_clip_hik(nvr, channel, start_str, end_str, out_path,
+                                progress_cb=progress_cb, watermark=watermark,
+                                wm_pos=wm_pos, wm_scroll=wm_scroll,
+                                wm_size=wm_size, encoder=encoder)
     import requests
     from requests.auth import HTTPDigestAuth
 
@@ -418,9 +509,12 @@ def dahua_fast_clip(nvr_host: str, user: str, password: str,
     drawtext = build_drawtext(watermark, out_path, wm_pos, wm_scroll, wm_size) if watermark else ""
     enc_args, enc_name = encoder_args(encoder, bool(drawtext))
 
+    # Ép demuxer DAV: file loadfile.cgi của một số NVR (vd. Lã Vọng) không bắt đầu
+    # bằng chữ ký "DHAV" → ffmpeg tự nhận nhầm là H.264 thô → MẤT TIẾNG (pcm_alaw)
+    # và sai timestamp (clip 5 phút ra ~10 phút, chạy chậm).
     args = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-        "-i", str(tmp),
+        "-f", "dhav", "-i", str(tmp),
     ]
     if drawtext:
         vf = drawtext if enc_name != "h264_v4l2m2m" else "format=yuv420p," + drawtext
@@ -431,7 +525,7 @@ def dahua_fast_clip(nvr_host: str, user: str, password: str,
         enc_name = no_wm_name
         if no_wm_name == "copy":
             # HEVC copy → tag 'hvc1' để iPhone phát/lưu được.
-            vcodec = _probe_vcodec(tmp)
+            vcodec = _probe_vcodec(tmp, fmt="dhav")
             if _is_hevc(vcodec):
                 args += ["-tag:v", "hvc1"]
     args += [
@@ -453,7 +547,7 @@ def dahua_fast_clip(nvr_host: str, user: str, password: str,
             with open(log, "ab") as f:
                 f.write(b"[fallback] h264_v4l2m2m failed, retrying with libx264\n")
             fb = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-                  "-i", str(tmp)]
+                  "-f", "dhav", "-i", str(tmp)]
             if drawtext: fb += ["-vf", drawtext]
             fb += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                    "-c:a", "aac", "-b:a", "128k",
@@ -554,23 +648,20 @@ def _channel_lock(cid: int) -> _Lock:
 
 
 def _dahua_snapshot_bytes(ch: dict, timeout: float) -> bytes:
-    """Fetch 1 JPEG từ Dahua snapshot.cgi với Digest Auth. b'' nếu fail."""
+    """Vendor-aware snapshot bytes. Dispatcher thực tế nằm trong vendors.py.
+    Tên giữ `_dahua_` cho tương thích ngược — gọi vendor đúng phía dưới."""
     try:
-        import requests
-        from requests.auth import HTTPDigestAuth
+        import vendors as _v
     except Exception:
         return b""
-    url = (f"http://{ch['nvr_host']}/cgi-bin/snapshot.cgi"
-           f"?channel={ch['channel']}&type=1")
-    try:
-        r = requests.get(url,
-                         auth=HTTPDigestAuth(ch["user"], ch["password"]),
-                         timeout=timeout)
-        if r.status_code == 200 and r.content[:3] == b"\xff\xd8\xff":
-            return r.content
-    except Exception:
-        pass
-    return b""
+    # `ch` row join nvrs, có host+user+password+vendor
+    nvr = {
+        "host": ch.get("nvr_host") or ch.get("host", ""),
+        "user": ch["user"],
+        "password": ch["password"],
+        "vendor": ch.get("vendor", "dahua"),
+    }
+    return _v.snapshot_bytes(nvr, ch["channel"], timeout)
 
 
 def _ffmpeg_jpeg(input_bytes: bytes, input_url: str,
@@ -667,13 +758,27 @@ def _list_capture_targets() -> list:
     """Trả về danh sách channel dict đủ info để capture."""
     try:
         with db() as conn:
-            rows = conn.execute("""
-                SELECT c.id, c.channel, c.nvr_id, c.subtype,
-                       n.host AS nvr_host, n.rtsp_port,
-                       n.user, n.password
-                FROM channels c JOIN nvrs n ON c.nvr_id = n.id
-            """).fetchall()
-        return [dict(r) for r in rows]
+            try:
+                rows = conn.execute("""
+                    SELECT c.id, c.channel, c.nvr_id, c.subtype,
+                           n.host AS nvr_host, n.rtsp_port,
+                           n.user, n.password,
+                           COALESCE(n.vendor, 'dahua') AS vendor
+                    FROM channels c JOIN nvrs n ON c.nvr_id = n.id
+                """).fetchall()
+            except sqlite3.OperationalError:
+                rows = conn.execute("""
+                    SELECT c.id, c.channel, c.nvr_id, c.subtype,
+                           n.host AS nvr_host, n.rtsp_port,
+                           n.user, n.password
+                    FROM channels c JOIN nvrs n ON c.nvr_id = n.id
+                """).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d.setdefault("vendor", "dahua")
+            out.append(d)
+        return out
     except Exception:
         return []
 

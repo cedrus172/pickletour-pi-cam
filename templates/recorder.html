@@ -112,6 +112,15 @@
   <div class="modal-body">
     <h3 id="n-title">Thêm NVR</h3>
     <label>Tên: <input id="n-name" placeholder="Dahua phòng khách"></label>
+    <label>Hãng:
+      <select id="n-vendor">
+        <option value="dahua" selected>Dahua (CGI: /cgi-bin/)</option>
+        <option value="hikvision">Hikvision (ISAPI: /ISAPI/)</option>
+      </select>
+    </label>
+    <small style="color:var(--muted);font-size:11px;display:block;margin-top:-4px;margin-bottom:8px">
+      Dahua → /cam/realmonitor &amp; loadfile.cgi. Hik → /Streaming/Channels/N01 &amp; /ISAPI.
+    </small>
     <label>Host: <input id="n-host" placeholder="192.168.1.246"></label>
     <label>RTSP port: <input id="n-port" type="number" value="554"></label>
     <label>User: <input id="n-user" value="admin"></label>

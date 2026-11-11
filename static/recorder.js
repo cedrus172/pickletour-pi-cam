@@ -531,6 +531,7 @@ function openModal() {
   $("#n-title").textContent = "Thêm NVR";
   ["n-name","n-host","n-user","n-pass","n-wm"].forEach(id => $("#"+id).value = "");
   $("#n-port").value = 554; $("#n-ch").value = 16; $("#n-user").value = "admin";
+  $("#n-vendor").value = "dahua";
   $("#n-wm-pos").value = "bl";
   $("#n-wm-size").value = "40";
   $("#n-wm-scroll").checked = false;
@@ -552,6 +553,7 @@ function openEditModal(nid) {
   $("#n-pass").value = "";
   $("#n-pass").placeholder = "(để trống nếu giữ nguyên)";
   $("#n-pass-hint").style.display = "block";
+  $("#n-vendor").value = n.vendor || "dahua";
   $("#n-ch").value = n.channels;
   $("#n-wm").value = n.clip_watermark || "";
   $("#n-wm-pos").value = n.clip_wm_pos || "bl";
@@ -596,7 +598,8 @@ async function scanChannels() {
       }
       resp = await api("/api/nvrs/scan-channels", {
         method: "POST",
-        body: JSON.stringify({host, user, password: pw}),
+        body: JSON.stringify({host, user, password: pw,
+                              vendor: $("#n-vendor").value}),
       });
     }
     renderScanResult(resp.channels || []);
@@ -703,6 +706,7 @@ async function saveNvr() {
     user: $("#n-user").value.trim(),
     password: $("#n-pass").value,
     channels: parseInt($("#n-ch").value),
+    vendor: $("#n-vendor").value,
     clip_watermark: $("#n-wm").value,
     clip_wm_pos: $("#n-wm-pos").value,
     clip_wm_size: parseInt($("#n-wm-size").value) || 40,
