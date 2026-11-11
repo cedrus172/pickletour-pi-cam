@@ -390,8 +390,8 @@ def api_get_logo(nid):
         return jsonify({"error": "nvr not found"}), 404
     nvr = dict(row); nvr.setdefault("vendor", "dahua")
     if nvr["vendor"] == "hikvision":
-        return jsonify({"unsupported": True,
-                        "note": "Logo overlay cho Hik chưa support — dùng OSD text thường."})
+        import vendors as _v
+        return jsonify(_v.logo_get_hik(nvr, int(request.args.get("channel", 1))))
     try:
         r = requests.get(f"http://{nvr['host']}/cgi-bin/configManager.cgi?action=getConfig&name=VideoWidget[{channel}]",
                          auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
@@ -441,8 +441,9 @@ def api_set_logo(nid):
         return jsonify({"error": "nvr not found"}), 404
     nvr = dict(row); nvr.setdefault("vendor", "dahua")
     if nvr["vendor"] == "hikvision":
-        return jsonify({"unsupported": True,
-                        "note": "Logo overlay cho Hik chưa support."})
+        import vendors as _v
+        # channel var ở trên = 0-based; Hik dùng 1-based
+        return jsonify(_v.logo_set_hik(nvr, channel + 1, text or "", position or "br"))
     params = _logo_set_params(channel, text, position, tuple(color) if color else None)
     try:
         ok, status, body = _dahua_setconfig(nvr["host"], nvr["user"], nvr["password"], params)
@@ -470,8 +471,12 @@ def api_logo_apply_all(nid):
         return jsonify({"error": "no channels configured for this NVR"}), 400
     nvr = dict(nvr_row); nvr.setdefault("vendor", "dahua")
     if nvr["vendor"] == "hikvision":
-        return jsonify({"unsupported": True,
-                        "note": "Logo overlay cho Hik chưa support."})
+        import vendors as _v
+        results = [{"channel": ch, **_v.logo_set_hik(nvr, ch, text or "", position or "br")}
+                   for ch in chs]
+        done = sum(1 for r in results if r.get("ok"))
+        return jsonify({"ok": done == len(results), "applied": done,
+                        "total": len(results), "results": results})
     results = []
     for ch in chs:
         params = _logo_set_params(ch - 1, text, position, tuple(color) if color else None)
@@ -499,8 +504,9 @@ def api_set_encode(nid):
         return jsonify({"error": "nvr not found"}), 404
     nvr = dict(row); nvr.setdefault("vendor", "dahua")
     if nvr["vendor"] == "hikvision":
-        return jsonify({"unsupported": True,
-                        "note": "Chỉnh codec cho Hik hãy dùng web UI → Video/Audio."})
+        import vendors as _v
+        # channel var ở trên = 0-based Dahua, Hik 1-based
+        return jsonify(_v.encode_set_hik(nvr, channel + 1, main or "", sub or ""))
     params = []
     if main:
         params.append(f"Encode[{channel}].MainFormat[0].Video.Compression={main}")
@@ -1412,9 +1418,9 @@ def api_nvr_image_get(nid):
     if err: return err
     nvr.setdefault("vendor", "dahua")
     if nvr["vendor"] == "hikvision":
-        return jsonify({"unsupported": True,
-                        "note": "Chỉnh image cho Hik hãy dùng web UI http://"
-                                + nvr["host"] + "  → Configuration → Image"})
+        import vendors as _v
+        channel = int(request.args.get("channel", 1))
+        return jsonify(_v.image_get_hik(nvr, channel))
     channel = int(request.args.get("channel", 1)) - 1  # 0-based cho CGI
     try:
         _, t = _dahua_cgi_get(nvr, "configManager.cgi",
@@ -1446,10 +1452,11 @@ def api_nvr_image_set(nid):
     nvr, err = _get_nvr_or_404(nid)
     if err: return err
     nvr.setdefault("vendor", "dahua")
-    if nvr["vendor"] == "hikvision":
-        return jsonify({"unsupported": True,
-                        "note": "Chỉnh image cho Hik hãy dùng web UI của NVR."})
     data = request.get_json(silent=True) or {}
+    if nvr["vendor"] == "hikvision":
+        import vendors as _v
+        channel = int(data.get("channel", 1))
+        return jsonify(_v.image_set_hik(nvr, channel, data))
     channel = int(data.get("channel", 1)) - 1
     params = []
     for src, dst in [("brightness", "Brightness"), ("contrast", "Contrast"),
@@ -1477,8 +1484,8 @@ def api_nvr_record_get(nid):
     if err: return err
     nvr.setdefault("vendor", "dahua")
     if nvr["vendor"] == "hikvision":
-        return jsonify({"unsupported": True, "modes": {},
-                        "note": "Chỉnh record mode cho Hik hãy dùng web UI → Storage → Schedule."})
+        import vendors as _v
+        return jsonify(_v.record_get_all_hik(nvr))
     try:
         _, t = _dahua_cgi_get(nvr, "configManager.cgi",
                               {"action": "getConfig", "name": "RecordMode"})
@@ -1501,10 +1508,20 @@ def api_nvr_record_set(nid):
     nvr, err = _get_nvr_or_404(nid)
     if err: return err
     nvr.setdefault("vendor", "dahua")
-    if nvr["vendor"] == "hikvision":
-        return jsonify({"unsupported": True,
-                        "note": "Chỉnh record mode cho Hik hãy dùng web UI."})
     data = request.get_json(silent=True) or {}
+    if nvr["vendor"] == "hikvision":
+        import vendors as _v
+        if "all" in data:
+            m = max(0, min(2, int(data["all"])))
+            results = []
+            for ch in range(1, int(nvr["channels"]) + 1):
+                results.append({"channel": ch, **_v.record_set_hik(nvr, ch, m)})
+            done = sum(1 for r in results if r.get("ok"))
+            return jsonify({"ok": done == len(results), "applied": done,
+                            "total": len(results), "results": results})
+        ch = int(data["channel"])
+        m = max(0, min(2, int(data["mode"])))
+        return jsonify(_v.record_set_hik(nvr, ch, m))
     params = []
     if "all" in data:
         m = max(0, min(2, int(data["all"])))

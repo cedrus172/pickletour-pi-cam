@@ -844,6 +844,284 @@ def storage_hik(nvr: dict, timeout: float = 10.0) -> dict:
 
 
 # ============================================================================
+# IMAGE SETTINGS — Hikvision (color + ircut day/night)
+# ============================================================================
+def image_get_hik(nvr: dict, channel: int, timeout: float = 8.0) -> dict:
+    """GET /ISAPI/Image/channels/{ch}/color + /ircutfilter."""
+    import xml.etree.ElementTree as ET
+    auth = HTTPDigestAuth(nvr["user"], nvr["password"])
+    host = nvr["host"]
+    out = {"channel": channel, "brightness": 50, "contrast": 50,
+           "saturation": 50, "hue": 50, "gamma": 50, "style": "Standard",
+           "day_night_mode": 0}
+    try:
+        r = requests.get(f"http://{host}/ISAPI/Image/channels/{channel}/color",
+                         auth=auth, timeout=timeout, verify=False)
+        if r.status_code == 200:
+            root = ET.fromstring(r.text)
+            for k, tag in (("brightness", "brightnessLevel"),
+                           ("contrast", "contrastLevel"),
+                           ("saturation", "saturationLevel"),
+                           ("hue", "hueLevel")):
+                v = _htext(root, tag)
+                if v:
+                    try: out[k] = int(v)
+                    except ValueError: pass
+    except Exception:
+        pass
+    # IrcutFilter
+    try:
+        r = requests.get(f"http://{host}/ISAPI/Image/channels/{channel}/ircutfilter",
+                         auth=auth, timeout=timeout, verify=False)
+        if r.status_code == 200:
+            root = ET.fromstring(r.text)
+            mode = (_htext(root, "IrcutFilterType") or "").lower()
+            # 0=Auto, 1=Day (color), 2=Night (BW)
+            out["day_night_mode"] = {"auto": 0, "day": 1, "night": 2}.get(mode, 0)
+    except Exception:
+        pass
+    return out
+
+
+def image_set_hik(nvr: dict, channel: int, changes: dict,
+                  timeout: float = 10.0) -> dict:
+    """PUT image settings. changes: {brightness, contrast, saturation, hue,
+    gamma, day_night_mode} — chỉ gửi field có trong dict."""
+    auth = HTTPDigestAuth(nvr["user"], nvr["password"])
+    host = nvr["host"]
+    applied = []
+    errors = []
+    # Color group
+    color_keys = {"brightness": "brightnessLevel", "contrast": "contrastLevel",
+                  "saturation": "saturationLevel", "hue": "hueLevel"}
+    color_changes = {k: v for k, v in changes.items() if k in color_keys}
+    if color_changes:
+        try:
+            r = requests.get(f"http://{host}/ISAPI/Image/channels/{channel}/color",
+                             auth=auth, timeout=timeout, verify=False)
+            if r.status_code != 200:
+                errors.append(f"GET color HTTP {r.status_code}")
+            else:
+                xml = r.text
+                for k, tag in color_keys.items():
+                    if k in color_changes:
+                        v = str(max(0, min(100, int(color_changes[k]))))
+                        xml = re.sub(rf"<{tag}>[^<]*</{tag}>",
+                                     f"<{tag}>{v}</{tag}>", xml)
+                        applied.append(k)
+                r = requests.put(f"http://{host}/ISAPI/Image/channels/{channel}/color",
+                                 data=xml.encode("utf-8"),
+                                 headers={"Content-Type": "application/xml"},
+                                 auth=auth, timeout=timeout, verify=False)
+                if r.status_code not in (200, 201):
+                    errors.append(f"PUT color HTTP {r.status_code}: {r.text[:120]}")
+        except Exception as e:
+            errors.append(f"color: {e}")
+    # IrcutFilter (day/night)
+    if "day_night_mode" in changes:
+        mode_map = {0: "auto", 1: "day", 2: "night"}
+        try:
+            mode_val = mode_map.get(int(changes["day_night_mode"]), "auto")
+            body = (f'<?xml version="1.0" encoding="UTF-8"?>\n'
+                    f'<IrcutFilter version="1.0" '
+                    f'xmlns="http://www.hikvision.com/ver20/XMLSchema">\n'
+                    f'  <IrcutFilterType>{mode_val}</IrcutFilterType>\n'
+                    f'</IrcutFilter>\n')
+            r = requests.put(f"http://{host}/ISAPI/Image/channels/{channel}/ircutfilter",
+                             data=body.encode("utf-8"),
+                             headers={"Content-Type": "application/xml"},
+                             auth=auth, timeout=timeout, verify=False)
+            if r.status_code in (200, 201):
+                applied.append("day_night_mode")
+            else:
+                errors.append(f"PUT ircut HTTP {r.status_code}")
+        except Exception as e:
+            errors.append(f"ircut: {e}")
+    return {"ok": not errors, "applied": applied, "errors": errors}
+
+
+# ============================================================================
+# RECORD MODE — Hikvision (manual start/stop per channel)
+# ============================================================================
+def record_get_all_hik(nvr: dict, timeout: float = 10.0) -> dict:
+    """Query recording status của mọi channel. Trả {modes: {channel: mode}}.
+    mode 0 = Auto (theo schedule), 1 = Manual ON, 2 = Manual OFF (override)."""
+    import xml.etree.ElementTree as ET
+    auth = HTTPDigestAuth(nvr["user"], nvr["password"])
+    host = nvr["host"]
+    modes = {}
+    try:
+        r = requests.get(f"http://{host}/ISAPI/ContentMgmt/record/tracks",
+                         auth=auth, timeout=timeout, verify=False)
+        if r.status_code != 200:
+            return {"ok": False, "modes": {},
+                    "error": f"HTTP {r.status_code}"}
+        root = ET.fromstring(r.text)
+    except Exception as e:
+        return {"ok": False, "modes": {}, "error": str(e)}
+    # Mỗi <Track><id>N01</id><Description>...</Description><LoopEnable>...
+    for tr in _hfindall(root, "Track"):
+        tid = _htext(tr, "id")
+        if not tid or not tid.endswith("01"):
+            continue  # chỉ track main stream
+        try:
+            ch = int(tid[:-2]) if len(tid) > 2 else int(tid)
+        except ValueError:
+            continue
+        enabled = (_htext(tr, "Enable") or _htext(tr, "LoopEnable") or "false").lower() == "true"
+        modes[ch] = 0 if enabled else 2  # mặc định 0=Auto nếu schedule bật
+    return {"ok": True, "modes": modes}
+
+
+def record_set_hik(nvr: dict, channel: int, mode: int,
+                   timeout: float = 10.0) -> dict:
+    """Manual start/stop recording. mode 0=Auto(schedule), 1=Manual ON, 2=Off.
+    Hik dùng /ISAPI/ContentMgmt/record/control/manual/{start,stop}/tracks/{ch}01."""
+    auth = HTTPDigestAuth(nvr["user"], nvr["password"])
+    host = nvr["host"]
+    track = f"{channel}01"
+    action = "stop" if int(mode) == 2 else "start" if int(mode) == 1 else "start"
+    # mode 0 (auto) → đảm bảo manual stop để schedule control
+    if int(mode) == 0:
+        action = "stop"
+    url = (f"http://{host}/ISAPI/ContentMgmt/record/control/manual/"
+           f"{action}/tracks/{track}")
+    try:
+        r = requests.put(url, auth=auth, timeout=timeout, verify=False)
+        return {"ok": r.status_code in (200, 201), "status": r.status_code,
+                "action": action, "channel": channel,
+                "resp": r.text[:200]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ============================================================================
+# LOGO OVERLAY — Hikvision (TextOverlay slot)
+# ============================================================================
+_HIK_LOGO_SLOT = 1  # TextOverlay id — slot 0 thường dành cho channel name
+_HIK_LOGO_POS = {
+    # Phần trăm vị trí trên normalizedScreen (default 704x576)
+    "tl": (24, 24),
+    "tr": (520, 24),     # 704-184
+    "bl": (24, 500),
+    "br": (520, 500),
+}
+
+
+def logo_get_hik(nvr: dict, channel: int, timeout: float = 8.0) -> dict:
+    """GET /ISAPI/System/Video/inputs/channels/{ch}/overlays, parse TextOverlay slot."""
+    import xml.etree.ElementTree as ET
+    auth = HTTPDigestAuth(nvr["user"], nvr["password"])
+    host = nvr["host"]
+    out = {"channel": channel, "enabled": False, "text": "",
+           "position": "br", "color": [255, 255, 255, 255]}
+    try:
+        r = requests.get(f"http://{host}/ISAPI/System/Video/inputs/channels/{channel}/overlays",
+                         auth=auth, timeout=timeout, verify=False)
+        if r.status_code != 200:
+            return out
+        root = ET.fromstring(r.text)
+    except Exception:
+        return out
+    tol = _hfind(root, "TextOverlayList")
+    if tol is None:
+        return out
+    for t in _hfindall(tol, "TextOverlay"):
+        tid = _htext(t, "id")
+        if tid == str(_HIK_LOGO_SLOT):
+            out["enabled"] = (_htext(t, "enabled") or "false").lower() == "true"
+            out["text"] = _htext(t, "message") or ""
+            break
+    return out
+
+
+def logo_set_hik(nvr: dict, channel: int, text: str, position: str = "br",
+                 timeout: float = 10.0) -> dict:
+    """Set/clear logo text overlay. text='' → tắt overlay."""
+    import xml.etree.ElementTree as ET
+    auth = HTTPDigestAuth(nvr["user"], nvr["password"])
+    host = nvr["host"]
+    try:
+        r = requests.get(f"http://{host}/ISAPI/System/Video/inputs/channels/{channel}/overlays",
+                         auth=auth, timeout=timeout, verify=False)
+        if r.status_code != 200:
+            return {"ok": False, "error": f"GET HTTP {r.status_code}"}
+        xml = r.text
+    except Exception as e:
+        return {"ok": False, "error": f"GET: {e}"}
+    enabled = "true" if text.strip() else "false"
+    px, py = _HIK_LOGO_POS.get(position, _HIK_LOGO_POS["br"])
+    text_esc = _xml_escape(text.strip())
+    # Build TextOverlay XML cho slot 1
+    new_overlay = (
+        f'<TextOverlay>'
+        f'<id>{_HIK_LOGO_SLOT}</id>'
+        f'<enabled>{enabled}</enabled>'
+        f'<positionX>{px}</positionX>'
+        f'<positionY>{py}</positionY>'
+        f'<message>{text_esc}</message>'
+        f'</TextOverlay>'
+    )
+    # Pattern match existing TextOverlay with id=slot, replace; nếu không có → inject
+    # trong TextOverlayList.
+    slot_re = re.compile(
+        rf'<TextOverlay\b[^>]*>\s*<id>{_HIK_LOGO_SLOT}</id>.*?</TextOverlay>',
+        re.DOTALL)
+    if slot_re.search(xml):
+        xml = slot_re.sub(new_overlay, xml, count=1)
+    else:
+        # Inject vào cuối TextOverlayList
+        xml = re.sub(r"</TextOverlayList>", new_overlay + "</TextOverlayList>",
+                     xml, count=1)
+    try:
+        r = requests.put(f"http://{host}/ISAPI/System/Video/inputs/channels/{channel}/overlays",
+                         data=xml.encode("utf-8"),
+                         headers={"Content-Type": "application/xml"},
+                         auth=auth, timeout=timeout, verify=False)
+        return {"ok": r.status_code in (200, 201), "status": r.status_code,
+                "resp": r.text[:200]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ============================================================================
+# ENCODE SET — Hikvision (change codec H.264 ↔ H.265)
+# ============================================================================
+def encode_set_hik(nvr: dict, channel: int, main: str = "", sub: str = "",
+                   timeout: float = 15.0) -> dict:
+    """Change codec. main/sub: 'H.264' hoặc 'H.265'. '' = giữ nguyên.
+    Hik: /ISAPI/Streaming/channels/{ch}01 (main) + {ch}02 (sub)."""
+    auth = HTTPDigestAuth(nvr["user"], nvr["password"])
+    host = nvr["host"]
+    applied = []
+    errors = []
+    for suffix, bucket, new_codec in (("01", "main", main), ("02", "sub", sub)):
+        if not new_codec:
+            continue
+        codec = new_codec.upper().replace(".", "")  # H264 / H265
+        try:
+            r = requests.get(f"http://{host}/ISAPI/Streaming/channels/{channel}{suffix}",
+                             auth=auth, timeout=timeout, verify=False)
+            if r.status_code != 200:
+                errors.append(f"{bucket} GET HTTP {r.status_code}")
+                continue
+            xml = r.text
+            xml = re.sub(r"<videoCodecType>[^<]*</videoCodecType>",
+                         f"<videoCodecType>{codec}</videoCodecType>", xml)
+            r = requests.put(f"http://{host}/ISAPI/Streaming/channels/{channel}{suffix}",
+                             data=xml.encode("utf-8"),
+                             headers={"Content-Type": "application/xml"},
+                             auth=auth, timeout=timeout, verify=False)
+            if r.status_code in (200, 201):
+                applied.append(f"{bucket}={codec}")
+            else:
+                errors.append(f"{bucket} PUT HTTP {r.status_code}: {r.text[:120]}")
+        except Exception as e:
+            errors.append(f"{bucket}: {e}")
+    return {"ok": not errors, "applied": applied, "errors": errors}
+
+
+# ============================================================================
 # ENCODE INFO — vendor dispatch
 # ============================================================================
 def get_encode_info(nvr: dict, channel: int, timeout: float = 10.0) -> dict:
