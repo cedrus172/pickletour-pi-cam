@@ -666,21 +666,54 @@ async function scanChannelsOnvif() {
 function renderScanResult(channels) {
   const body = $("#n-scan-body");
   body.innerHTML = "";
+  // Phát hiện có cam direct nào không → hiện hướng dẫn pass
+  const hasDirect = channels.some(c => c.camera_host);
+  if (hasDirect) {
+    $("#n-scan-hint").innerHTML +=
+      `<div style="margin-top:6px;padding:8px;background:rgba(251,191,36,0.1);border-left:3px solid #fbbf24;font-size:12px;color:#fbbf24">
+        ⚠ Hik NVR phát hiện có camera IP riêng. Firmware NVR mới thường stream H.264 bị lỗi PPS (video đen).
+        Nên nhập <b>password gốc của từng cam</b> (nếu khác NVR) để stream TRỰC TIẾP từ IP cam.
+        Để trống = dùng cùng password NVR.
+      </div>`;
+  }
   for (const c of channels) {
     const tr = document.createElement("tr");
     const checked = c.in_local ? "checked" : "";
     const displayName = c.local_name || c.title;
     const subtype = c.local_subtype || 0;
-    // Highlight dòng đã có trong DB bằng background xanh nhạt
+    const camHost = c.camera_host || "";
+    const camUser = c.local_camera_user || "";
+    const pwPlaceholder = c.local_has_password
+      ? "đã lưu — để trống để giữ"
+      : "password của cam " + camHost;
     if (c.in_local) tr.style.background = "rgba(80,180,255,0.08)";
+    const camBadge = camHost
+      ? `<div style="font-size:10px;color:var(--ok,#4e4);font-family:var(--mono);margin-top:3px">direct: ${camHost}</div>`
+      : `<div style="font-size:10px;color:var(--muted);margin-top:3px">via NVR</div>`;
+    // Cam password field — chỉ hiện khi có cam_host (Hik proxy)
+    const camPwRow = camHost
+      ? `<div style="display:flex;gap:4px;margin-top:4px">
+           <input type="text" class="scan-camuser" data-ch="${c.channel}"
+                  placeholder="user (vd admin)" value="${escapeHtml(camUser)}"
+                  style="width:40%;font-size:11px;padding:3px 6px">
+           <input type="password" class="scan-campw" data-ch="${c.channel}"
+                  placeholder="${pwPlaceholder}"
+                  style="width:60%;font-size:11px;padding:3px 6px">
+         </div>`
+      : "";
     tr.innerHTML = `
       <td style="text-align:center">
         <input type="checkbox" class="scan-ck" data-ch="${c.channel}" ${checked}>
       </td>
-      <td style="text-align:center;color:var(--muted);font-family:var(--mono)">${c.channel}</td>
+      <td style="text-align:center;color:var(--muted);font-family:var(--mono)">
+        ${c.channel}${camBadge}
+      </td>
       <td>
         <input type="text" class="scan-name" data-ch="${c.channel}"
                value="${escapeHtml(displayName)}">
+        <input type="hidden" class="scan-camhost" data-ch="${c.channel}"
+               value="${escapeHtml(camHost)}">
+        ${camPwRow}
       </td>
       <td>
         <select class="scan-sub" data-ch="${c.channel}">
@@ -723,7 +756,16 @@ async function saveNvr() {
     const ch = parseInt(ck.dataset.ch);
     const name = tr.querySelector(".scan-name").value.trim();
     const sub = parseInt(tr.querySelector(".scan-sub").value);
-    if (name) channelsToUpsert.push({channel: ch, name, subtype: sub});
+    const camHostEl = tr.querySelector(".scan-camhost");
+    const camUserEl = tr.querySelector(".scan-camuser");
+    const camPwEl = tr.querySelector(".scan-campw");
+    const cam_host = camHostEl ? camHostEl.value.trim() : "";
+    const cam_user = camUserEl ? camUserEl.value.trim() : "";
+    const cam_password = camPwEl ? camPwEl.value : "";
+    if (name) channelsToUpsert.push({
+      channel: ch, name, subtype: sub,
+      camera_host: cam_host, camera_user: cam_user, camera_password: cam_password,
+    });
   }
 
   try {

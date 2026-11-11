@@ -89,6 +89,21 @@ def db():
         UNIQUE(nvr_id, channel),
         FOREIGN KEY (nvr_id) REFERENCES nvrs(id) ON DELETE CASCADE
     )""")
+    # camera_host/user/password: cred RIÊNG của IP cam (Hik proxy cam).
+    # Khi có, stream RTSP trực tiếp từ cam — bypass NVR transmux (cần vì
+    # firmware Hik mới có bug PPS 0 trên NVR path, và direct = nhanh hơn).
+    # Trống → fallback stream qua NVR (channel index).
+    try:
+        chan_cols = {r[1] for r in conn.execute("PRAGMA table_info(channels)").fetchall()}
+        if "camera_host" not in chan_cols:
+            conn.execute("ALTER TABLE channels ADD COLUMN camera_host TEXT DEFAULT ''")
+        if "camera_user" not in chan_cols:
+            conn.execute("ALTER TABLE channels ADD COLUMN camera_user TEXT DEFAULT ''")
+        if "camera_password" not in chan_cols:
+            conn.execute("ALTER TABLE channels ADD COLUMN camera_password TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass
     conn.execute("""CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -221,6 +236,9 @@ def get_channel(cid: int) -> dict | None:
             row = conn.execute("""
                 SELECT c.*, n.name AS nvr_name, n.host AS nvr_host,
                        n.rtsp_port, n.user, n.password,
+                       COALESCE(c.camera_host, '') AS camera_host,
+                       COALESCE(c.camera_user, '') AS camera_user,
+                       COALESCE(c.camera_password, '') AS camera_password,
                        COALESCE(n.vendor, 'dahua') AS vendor,
                        COALESCE(n.clip_watermark, '') AS clip_watermark,
                        COALESCE(n.clip_wm_pos, 'bl')  AS clip_wm_pos,
@@ -247,6 +265,9 @@ def get_channel(cid: int) -> dict | None:
     d.setdefault("clip_wm_size", 40)
     d.setdefault("clip_encoder", "libx264")
     d.setdefault("vendor", "dahua")
+    d.setdefault("camera_host", "")
+    d.setdefault("camera_user", "")
+    d.setdefault("camera_password", "")
     return d
 
 
@@ -346,7 +367,12 @@ def channel_rtsp(ch: dict, mode: str, start: str = "", end: str = "",
                  subtype: int = -1) -> str:
     nvr = {"host": ch["nvr_host"], "rtsp_port": ch["rtsp_port"],
            "user": ch["user"], "password": ch["password"],
-           "vendor": ch.get("vendor", "dahua")}
+           "vendor": ch.get("vendor", "dahua"),
+           # Hik: cam riêng → stream TRỰC TIẾP, bypass NVR transmux.
+           # camera_user/password override NVR cred nếu cam có cred riêng.
+           "camera_host": ch.get("camera_host", ""),
+           "camera_user": ch.get("camera_user", ""),
+           "camera_password": ch.get("camera_password", "")}
     if subtype < 0:
         subtype = ch.get("subtype", 0)
     return rtsp_url(nvr, ch["channel"], mode, start, end, subtype)
@@ -648,19 +674,28 @@ def _channel_lock(cid: int) -> _Lock:
 
 
 def _dahua_snapshot_bytes(ch: dict, timeout: float) -> bytes:
-    """Vendor-aware snapshot bytes. Dispatcher thực tế nằm trong vendors.py.
-    Tên giữ `_dahua_` cho tương thích ngược — gọi vendor đúng phía dưới."""
+    """Vendor-aware snapshot bytes. Hik với cam_host → snapshot TRỰC TIẾP
+    từ cam IP (nhanh hơn, không qua NVR proxy). Fallback qua NVR nếu
+    camera_host trống."""
     try:
         import vendors as _v
     except Exception:
         return b""
-    # `ch` row join nvrs, có host+user+password+vendor
     nvr = {
         "host": ch.get("nvr_host") or ch.get("host", ""),
         "user": ch["user"],
         "password": ch["password"],
         "vendor": ch.get("vendor", "dahua"),
     }
+    cam_host = (ch.get("camera_host") or "").strip()
+    if cam_host and nvr["vendor"] == "hikvision":
+        cam_user = (ch.get("camera_user") or ch["user"]).strip() or ch["user"]
+        cam_pw = ch.get("camera_password") or ch["password"]
+        cam_nvr = {**nvr, "host": cam_host, "user": cam_user, "password": cam_pw}
+        b = _v.snapshot_bytes(cam_nvr, 1, timeout)
+        if b:
+            return b
+        # Fallback qua NVR nếu direct fail (cred sai hoặc cam offline)
     return _v.snapshot_bytes(nvr, ch["channel"], timeout)
 
 
@@ -763,6 +798,7 @@ def _list_capture_targets() -> list:
                     SELECT c.id, c.channel, c.nvr_id, c.subtype,
                            n.host AS nvr_host, n.rtsp_port,
                            n.user, n.password,
+                           COALESCE(c.camera_host, '') AS camera_host,
                            COALESCE(n.vendor, 'dahua') AS vendor
                     FROM channels c JOIN nvrs n ON c.nvr_id = n.id
                 """).fetchall()

@@ -110,27 +110,46 @@ def _hik_snapshot_bytes(nvr: dict, channel: int, timeout: float) -> bytes:
 # RTSP URLs
 # ============================================================================
 def rtsp_live(nvr: dict, channel: int, subtype: int = 0) -> str:
-    user = urllib.parse.quote(nvr["user"], safe="")
-    pw = urllib.parse.quote(nvr["password"], safe="")
+    """RTSP live URL. Hik: nếu nvr dict có 'camera_host' (IP riêng của cam),
+    stream TRỰC TIẾP từ cam qua /Streaming/Channels/101 — bypass NVR
+    transmux (fix bug PPS 0 trên firmware mới; nhanh hơn, 1-cam-1-stream).
+    'camera_user'/'camera_password' override cred nếu cam có cred riêng
+    (cam thường có pass khác NVR). Dahua: luôn qua NVR."""
     port = nvr.get("rtsp_port", 554)
     host = nvr["host"]
     if vendor_of(nvr) == "hikvision":
-        # Hik: channel 1 → "/Streaming/Channels/101" (main) hoặc "/102" (sub)
+        cam_host = (nvr.get("camera_host") or "").strip()
+        if cam_host:
+            # Direct cam: channel luôn = 1 từ góc nhìn cam riêng lẻ.
+            # Dùng cred của cam nếu có, else dùng cred NVR (thường cam Hik
+            # trong 1 cụm NVR có cùng cred 'admin', nhưng cài đặt lẻ có
+            # thể khác → user phải nhập).
+            cu = (nvr.get("camera_user") or nvr["user"]).strip() or nvr["user"]
+            cp = nvr.get("camera_password") or nvr["password"]
+            u = urllib.parse.quote(cu, safe="")
+            p = urllib.parse.quote(cp, safe="")
+            stream = "02" if subtype else "01"
+            return f"rtsp://{u}:{p}@{cam_host}:554/Streaming/Channels/1{stream}"
+        # Fallback: qua NVR với channel index
+        user = urllib.parse.quote(nvr["user"], safe="")
+        pw = urllib.parse.quote(nvr["password"], safe="")
         stream = "02" if subtype else "01"
         return f"rtsp://{user}:{pw}@{host}:{port}/Streaming/Channels/{channel}{stream}"
     # Dahua
+    user = urllib.parse.quote(nvr["user"], safe="")
+    pw = urllib.parse.quote(nvr["password"], safe="")
     return (f"rtsp://{user}:{pw}@{host}:{port}"
             f"/cam/realmonitor?channel={channel}&subtype={subtype}")
 
 
 def rtsp_playback(nvr: dict, channel: int, start: str, end: str) -> str:
-    """start/end: cho Dahua = 'YYYY_MM_DD_HH_MM_SS', cho Hik = 'YYYYMMDDTHHMMSSZ'."""
+    """start/end: cho Dahua = 'YYYY_MM_DD_HH_MM_SS', cho Hik = 'YYYYMMDDTHHMMSSZ'.
+    Playback LUÔN qua NVR vì cam IP không lưu lịch sử — chỉ NVR có ổ cứng."""
     user = urllib.parse.quote(nvr["user"], safe="")
     pw = urllib.parse.quote(nvr["password"], safe="")
     port = nvr.get("rtsp_port", 554)
     host = nvr["host"]
     if vendor_of(nvr) == "hikvision":
-        # Hik playback: /Streaming/tracks/{ch}01?starttime=...Z&endtime=...Z
         return (f"rtsp://{user}:{pw}@{host}:{port}/Streaming/tracks/{channel}01"
                 f"?starttime={start}&endtime={end}")
     return (f"rtsp://{user}:{pw}@{host}:{port}"
@@ -233,8 +252,10 @@ def _dahua_list_channel_titles(host, user, pw, timeout=10.0) -> list:
 
 
 def _hik_list_channels(nvr: dict, timeout: float) -> list:
-    """Hik NVR: GET /ISAPI/ContentMgmt/InputProxy/channels. DVR fallback:
-    /ISAPI/System/Video/inputs/channels. Trả [{channel, title}]."""
+    """Hik NVR: GET /ISAPI/ContentMgmt/InputProxy/channels (NVR proxy cam IP).
+    DVR fallback: /ISAPI/System/Video/inputs/channels (local input).
+    Trả [{channel, title, camera_host}] — camera_host là IP riêng của cam
+    (dùng cho RTSP direct, bypass NVR transmux)."""
     out = []
     for path, tag in (
         ("/ISAPI/ContentMgmt/InputProxy/channels", "InputProxyChannel"),
@@ -255,7 +276,15 @@ def _hik_list_channels(nvr: dict, timeout: float) -> list:
                     cid = int(id_text)
                 except ValueError:
                     continue
-                out.append({"channel": cid, "title": _htext(el, "name").strip()})
+                entry = {"channel": cid, "title": _htext(el, "name").strip(),
+                         "camera_host": ""}
+                # sourceInputPortDescriptor có ipAddress của cam
+                src = _hfind(el, "sourceInputPortDescriptor")
+                if src is not None:
+                    ip = _htext(src, "ipAddress").strip()
+                    if ip:
+                        entry["camera_host"] = ip
+                out.append(entry)
             if out:
                 return out
         except Exception:
@@ -534,6 +563,7 @@ def fast_clip_hik(nvr: dict, channel: int, start_human: str, end_human: str,
     args = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
         "-rtsp_transport", "tcp",
+        "-analyzeduration", "10000000", "-probesize", "10000000",
         "-i", rtsp,
     ]
     if drawtext:
@@ -564,7 +594,9 @@ def fast_clip_hik(nvr: dict, channel: int, start_human: str, end_human: str,
             with open(log, "ab") as f:
                 f.write(b"[fallback] h264_v4l2m2m failed, retrying with libx264\n")
             fb = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-                  "-rtsp_transport", "tcp", "-i", rtsp]
+                  "-rtsp_transport", "tcp",
+                  "-analyzeduration", "10000000", "-probesize", "10000000",
+                  "-i", rtsp]
             if drawtext: fb += ["-vf", drawtext]
             fb += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                    "-c:a", "aac", "-b:a", "128k",

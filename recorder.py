@@ -543,9 +543,14 @@ def api_stream_start():
 
     rtsp = _rtsp_url(nvr, channel, mode, start, end, subtype)
     log = sdir / "ffmpeg.log"
+    # analyzeduration + probesize PHẢI đứng trước -i, nếu không Hik h264
+    # trả "non-existing PPS 0" và "dimensions not set" (SPS/PPS chưa đến
+    # khi ffmpeg bắt đầu ghi HLS header). 10s/10MB buffer đủ cho mọi NVR.
     args = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
         "-rtsp_transport", "tcp",
+        "-analyzeduration", "10000000",
+        "-probesize", "10000000",
         "-fflags", "+genpts+discardcorrupt",
         "-i", rtsp,
         "-c:v", "copy",
@@ -570,9 +575,9 @@ def api_stream_start():
             "channel": channel, "rtsp": rtsp,
         }
 
-    # Wait for manifest to appear (up to ~8s)
+    # Wait for manifest to appear (up to ~20s — analyzeduration=10s + encode).
     manifest = sdir / "index.m3u8"
-    for _ in range(40):
+    for _ in range(100):
         if manifest.exists() and manifest.stat().st_size > 50:
             break
         time.sleep(0.2)
@@ -1175,6 +1180,15 @@ def api_scan_channels(nid):
         t["local_id"] = local["id"] if local else None
         t["local_name"] = local["name"] if local else ""
         t["local_subtype"] = local["subtype"] if local else 0
+        # Hik: scan trả cam_host; nếu local đã save khác → dùng local
+        t.setdefault("camera_host", "")
+        if local:
+            if local.get("camera_host"):
+                t["camera_host"] = local["camera_host"]
+            # Trả về cred đã lưu để UI điền lại (password KHÔNG trả plain,
+            # chỉ 1 flag — user để trống = giữ pass cũ, bỏ tick thì mới xoá).
+            t["local_camera_user"] = local.get("camera_user", "") or ""
+            t["local_has_password"] = bool(local.get("camera_password"))
     return jsonify({"ok": True, "nvr": nvr["name"],
                     "vendor": nvr.get("vendor"), "channels": titles})
 
@@ -1538,23 +1552,30 @@ def api_channels_bulk(nid):
                 name = (c.get("name") or "").strip()
                 subtype = int(c.get("subtype") or 0)
                 desc = c.get("description") or ""
+                cam_host = (c.get("camera_host") or "").strip()
+                cam_user = (c.get("camera_user") or "").strip()
+                cam_pw = c.get("camera_password") or ""
                 if not name:
                     errors.append({"channel": ch_num, "error": "name empty"})
                     continue
                 existing = conn.execute(
-                    "SELECT id FROM channels WHERE nvr_id=? AND channel=?",
+                    "SELECT id, camera_password FROM channels WHERE nvr_id=? AND channel=?",
                     (nid, ch_num)).fetchone()
                 if existing:
+                    # Password trống = giữ pass cũ (giống NVR password UX)
+                    final_pw = cam_pw if cam_pw else (existing["camera_password"] or "")
                     conn.execute(
-                        "UPDATE channels SET name=?, subtype=?, description=? "
-                        "WHERE id=?",
-                        (name, subtype, desc, existing["id"]))
+                        "UPDATE channels SET name=?, subtype=?, description=?, "
+                        "camera_host=?, camera_user=?, camera_password=? WHERE id=?",
+                        (name, subtype, desc, cam_host, cam_user, final_pw, existing["id"]))
                     updated.append(ch_num)
                 else:
                     conn.execute(
                         "INSERT INTO channels (nvr_id,channel,name,description,"
-                        "subtype,created_at) VALUES (?,?,?,?,?,?)",
-                        (nid, ch_num, name, desc, subtype, time.time()))
+                        "subtype,camera_host,camera_user,camera_password,created_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        (nid, ch_num, name, desc, subtype, cam_host, cam_user, cam_pw,
+                         time.time()))
                     added.append(ch_num)
             except Exception as e:
                 errors.append({"channel": c.get("channel"), "error": str(e)})
