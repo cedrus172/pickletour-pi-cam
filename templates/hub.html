@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PiTailscale Hub — Quản lý tất cả sân</title>
+<style>
+:root{
+  --bg:#0b1220; --card:#121a2b; --border:#223049; --muted:#7c8aa5;
+  --text:#e6edf7; --accent:#4a9eff; --ok:#4ade80; --danger:#f87171;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:14px}
+header{display:flex;align-items:center;gap:12px;padding:16px 20px;
+  border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:5}
+header h1{font-size:18px;margin:0}
+.badge{font-family:var(--mono);font-size:10px;padding:2px 8px;border-radius:10px;
+  background:rgba(74,222,128,.15);color:var(--ok);border:1px solid rgba(74,222,128,.35)}
+.counts{margin-left:auto;color:var(--muted);font-size:13px}
+main{padding:20px;max-width:1200px;margin:0 auto}
+.sec-title{font-size:13px;text-transform:uppercase;letter-spacing:.5px;
+  color:var(--accent);margin:24px 0 10px;display:flex;align-items:center;gap:8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;
+  overflow:hidden;display:flex;flex-direction:column}
+.thumb{aspect-ratio:16/9;background:#060a12 center/cover no-repeat;position:relative}
+.thumb .noimg{position:absolute;inset:0;display:flex;align-items:center;
+  justify-content:center;color:var(--muted);font-size:12px}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+.dot.on{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+.dot.off{background:var(--danger)}
+.cbody{padding:12px;display:flex;flex-direction:column;gap:6px}
+.cname{font-weight:600;font-size:15px;display:flex;align-items:center;gap:8px}
+.chost{font-family:var(--mono);font-size:11px;color:var(--muted);word-break:break-all}
+.tag{font-size:10px;padding:1px 7px;border-radius:8px;border:1px solid var(--border);
+  color:var(--muted);text-transform:uppercase}
+.tag.ddns{color:#fbbf24;border-color:rgba(251,191,36,.4)}
+.tag.pi{color:#4a9eff;border-color:rgba(74,158,255,.4)}
+.cams{font-size:12px;color:var(--muted)}
+.btns{display:flex;gap:8px;margin-top:6px}
+.btn{flex:1;text-align:center;padding:7px;border-radius:7px;border:1px solid var(--border);
+  background:transparent;color:var(--text);cursor:pointer;text-decoration:none;font-size:13px}
+.btn:hover{border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#06101f;font-weight:600}
+.btn.sm{flex:0 0 auto;padding:7px 10px}
+.btn.danger{color:var(--danger);border-color:rgba(248,113,113,.4)}
+.add-btn{padding:9px 14px;border-radius:8px;background:var(--accent);color:#06101f;
+  border:none;font-weight:600;cursor:pointer;font-size:13px}
+.empty{color:var(--muted);padding:20px;text-align:center;border:1px dashed var(--border);
+  border-radius:10px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;
+  align-items:center;justify-content:center;z-index:20;padding:16px}
+.modal.show{display:flex}
+.modal-body{background:var(--card);border:1px solid var(--border);border-radius:12px;
+  padding:20px;width:100%;max-width:420px}
+.modal-body h3{margin:0 0 14px}
+.modal-body label{display:block;margin-bottom:10px;font-size:13px;color:var(--muted)}
+.modal-body input{width:100%;margin-top:4px;padding:8px 10px;background:#0b1220;
+  border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px}
+.row-right{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}
+.spin{color:var(--muted);padding:40px;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎾 PiTailscale Hub</h1>
+  <span class="badge">{{ build_label }}</span>
+  <span class="counts" id="counts"></span>
+</header>
+<main>
+  <div class="sec-title">
+    ⬤ Sân dùng đầu thu DDNS (chạy trên VPS)
+    <button class="add-btn" style="margin-left:auto;font-size:12px"
+      onclick="location.href='http://'+location.hostname+':{{ 9997 }}/'">+ Thêm NVR DDNS</button>
+  </div>
+  <div class="grid" id="ddns-grid"><div class="spin">Đang tải…</div></div>
+
+  <div class="sec-title" style="margin-top:32px">
+    ⬤ Sân có Pi (Tailscale)
+    <button class="add-btn" style="margin-left:auto;font-size:12px" onclick="openPiModal()">+ Thêm sân Pi</button>
+  </div>
+  <div class="grid" id="pi-grid"></div>
+</main>
+
+<div class="modal" id="pi-modal">
+  <div class="modal-body">
+    <h3>Thêm sân có Pi</h3>
+    <label>Tên sân<input id="pv-name" placeholder="Sân Quang Trung"></label>
+    <label>Tailscale IP/host của Pi<input id="pv-host" placeholder="100.76.29.104"></label>
+    <label>Recorder port<input id="pv-rport" type="number" value="9997"></label>
+    <label>Clip port<input id="pv-cport" type="number" value="9996"></label>
+    <label>Ghi chú<input id="pv-note" placeholder="(tuỳ chọn)"></label>
+    <div class="row-right">
+      <button class="btn" onclick="closePiModal()">Huỷ</button>
+      <button class="btn primary" onclick="savePi()">Lưu</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+async function api(u,o){const r=await fetch(u,o||{});if(!r.ok)throw new Error((await r.json()).error||r.status);return r.json();}
+
+function card(v){
+  const online=v.online;
+  const dot=`<span class="dot ${online?'on':'off'}"></span>`;
+  const tag=`<span class="tag ${v.type}">${v.type==='ddns'?'DDNS':'Pi'}</span>`;
+  let cams='';
+  if(v.type==='ddns'&&v.cams_total!=null)
+    cams=`<div class="cams">${v.cams_online}/${v.cams_total} cam online${v.model?' · '+v.model:''}</div>`;
+  else if(v.type==='ddns'&&!online)
+    cams=`<div class="cams" style="color:var(--danger)">⚠ NVR offline${v.error?' · '+v.error.slice(0,40):''}</div>`;
+  const thumb=v.type==='ddns'&&online
+    ? `<div class="thumb" style="background-image:url('${v.thumb_url}?t=${Date.now()}')"></div>`
+    : `<div class="thumb"><span class="noimg">${online?'(sân Pi)':'offline'}</span></div>`;
+  const del=v.type==='pi'?`<button class="btn sm danger" onclick="delPi(${v.id})">✕</button>`:'';
+  return `<div class="card">
+    ${thumb}
+    <div class="cbody">
+      <div class="cname">${dot}${v.name} ${tag}</div>
+      <div class="chost">${v.host}</div>
+      ${cams}
+      <div class="btns">
+        <a class="btn" href="${v.admin_url}" target="_blank">Admin</a>
+        <a class="btn primary" href="${v.clip_url}" target="_blank">Clip khách</a>
+        ${del}
+      </div>
+    </div>
+  </div>`;
+}
+
+async function load(){
+  try{
+    const d=await api('/api/venues');
+    $('#counts').textContent=`${d.counts.total} sân · ${d.counts.ddns} DDNS · ${d.counts.pi} Pi`;
+    const ddns=d.venues.filter(v=>v.type==='ddns');
+    const pi=d.venues.filter(v=>v.type==='pi');
+    $('#ddns-grid').innerHTML=ddns.length?ddns.map(card).join(''):'<div class="empty">Chưa có sân DDNS. Bấm "+ Thêm NVR DDNS" để thêm đầu thu qua recorder.</div>';
+    $('#pi-grid').innerHTML=pi.length?pi.map(card).join(''):'<div class="empty">Chưa có sân Pi nào.</div>';
+  }catch(e){ $('#ddns-grid').innerHTML=`<div class="empty">Lỗi: ${e.message}</div>`; }
+}
+
+function openPiModal(){$('#pi-modal').classList.add('show');}
+function closePiModal(){$('#pi-modal').classList.remove('show');}
+async function savePi(){
+  const body={name:$('#pv-name').value.trim(),host:$('#pv-host').value.trim(),
+    recorder_port:parseInt($('#pv-rport').value)||9997,
+    clip_port:parseInt($('#pv-cport').value)||9996,note:$('#pv-note').value.trim()};
+  if(!body.name||!body.host){alert('Nhập tên + host');return;}
+  try{await api('/api/pi-venues',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    closePiModal();['pv-name','pv-host','pv-note'].forEach(i=>$('#'+i).value='');load();}
+  catch(e){alert('Lỗi: '+e.message);}
+}
+async function delPi(id){
+  if(!confirm('Xoá sân Pi này khỏi hub? (không ảnh hưởng Pi)'))return;
+  await api('/api/pi-venues/'+id,{method:'DELETE'});load();
+}
+load();
+setInterval(load,30000);
+</script>
+</body>
+</html>

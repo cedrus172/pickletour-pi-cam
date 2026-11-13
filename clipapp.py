@@ -59,14 +59,51 @@ _clips_lock = threading.Lock()
 @app.route("/clip")
 @app.route("/clip/")
 def spa():
-    return render_template("clip.html")
+    return render_template("clip.html", venue_slug="")
+
+
+def _slug(name: str) -> str:
+    import re as _re
+    s = name.lower().strip()
+    for a, b in (("đ","d"),("ă","a"),("â","a"),("ê","e"),("ô","o"),
+                 ("ơ","o"),("ư","u")):
+        s = s.replace(a, b)
+    return _re.sub(r"[^a-z0-9]+", "-", s).strip("-") or "san"
+
+
+@app.route("/san/<slug>")
+def spa_venue(slug):
+    """Trang clip của 1 sân cụ thể (lọc cam theo NVR có tên khớp slug).
+    Dùng cho hub: mỗi sân DDNS 1 link khách riêng."""
+    return render_template("clip.html", venue_slug=slug)
+
+
+def _nvr_id_for_slug(slug: str):
+    """Tìm nvr_id có slug(name) khớp. None nếu không có / slug rỗng."""
+    if not slug:
+        return None
+    with rs.db() as conn:
+        for r in conn.execute("SELECT id, name FROM nvrs").fetchall():
+            if _slug(r["name"]) == slug:
+                return r["id"]
+    return None
 
 
 # ---------- Public API: channels + thumbnails ----------
 @app.get("/api/public/channels")
 def api_channels():
+    """Trả channel. ?venue=<slug> lọc theo sân (NVR tên khớp slug).
+    Không có venue → trả tất cả (tương thích cũ, dùng cho sân 1 NVR)."""
+    slug = (request.args.get("venue") or "").strip()
+    nid = _nvr_id_for_slug(slug)
     with rs.db() as conn:
-        rows = conn.execute("SELECT id, name, description FROM channels ORDER BY name").fetchall()
+        if nid is not None:
+            rows = conn.execute(
+                "SELECT id, name, description FROM channels WHERE nvr_id=? ORDER BY name",
+                (nid,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, name, description FROM channels ORDER BY name").fetchall()
     return jsonify([dict(r) for r in rows])
 
 

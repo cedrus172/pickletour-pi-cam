@@ -265,6 +265,7 @@
   <button class="tab" data-nav="settings"><span>⚙</span><small>Cài đặt</small></button>
 </nav>
 
+<script>window.VENUE_SLUG = {{ (venue_slug or "")|tojson }};</script>
 <script src="/static/clip.js?v={{ ver }}"></script>
 </body>
 </html>

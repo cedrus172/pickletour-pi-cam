@@ -96,7 +96,8 @@ async function loadHome() {
   const grid = $("#cam-grid");
   grid.innerHTML = `<div class="cam-empty">Đang tải camera...</div>`;
   try {
-    State.channels = await api("/api/public/channels");
+    State.channels = await api("/api/public/channels" +
+      (window.VENUE_SLUG ? "?venue=" + encodeURIComponent(window.VENUE_SLUG) : ""));
   } catch (e) {
     grid.innerHTML = `<div class="cam-empty">Lỗi: ${e.message}</div>`;
     return;
