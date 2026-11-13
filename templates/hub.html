@@ -73,7 +73,7 @@ main{padding:20px;max-width:1200px;margin:0 auto}
   <div class="sec-title">
     ⬤ Sân dùng đầu thu DDNS (chạy trên VPS)
     <button class="add-btn" style="margin-left:auto;font-size:12px"
-      onclick="location.href='http://'+location.hostname+':{{ 9997 }}/'">+ Thêm NVR DDNS</button>
+      onclick="window.open('{{ admin_base or (\"http://\"+request.host.split(\":\")[0]+\":9994\") }}/','_blank')">+ Thêm NVR DDNS</button>
   </div>
   <div class="grid" id="ddns-grid"><div class="spin">Đang tải…</div></div>
 
@@ -89,9 +89,17 @@ main{padding:20px;max-width:1200px;margin:0 auto}
     <h3>Thêm sân có Pi</h3>
     <label>Tên sân<input id="pv-name" placeholder="Sân Quang Trung"></label>
     <label>Tailscale IP/host của Pi<input id="pv-host" placeholder="100.76.29.104"></label>
-    <label>Recorder port<input id="pv-rport" type="number" value="9997"></label>
-    <label>Clip port<input id="pv-cport" type="number" value="9996"></label>
-    <label>Ghi chú<input id="pv-note" placeholder="(tuỳ chọn)"></label>
+    <label>URL khách công khai (Cloudflare…)<input id="pv-clipurl" placeholder="https://qtrung.pickletour.vn"></label>
+    <label>URL admin công khai (tuỳ chọn)<input id="pv-adminurl" placeholder="https://… (để trống nếu không có)"></label>
+    <details style="margin-bottom:10px">
+      <summary style="cursor:pointer;color:var(--muted);font-size:12px">Nâng cao (Tailscale fallback)</summary>
+      <label style="margin-top:8px">Recorder port<input id="pv-rport" type="number" value="9997"></label>
+      <label>Clip port<input id="pv-cport" type="number" value="9996"></label>
+      <label>Ghi chú<input id="pv-note" placeholder="(tuỳ chọn)"></label>
+    </details>
+    <small style="color:var(--muted);font-size:11px;display:block;margin-bottom:8px">
+      Có URL công khai → nút dùng link đó. Trống → fallback IP Tailscale (chỉ chạy trong tailnet).
+    </small>
     <div class="row-right">
       <button class="btn" onclick="closePiModal()">Huỷ</button>
       <button class="btn primary" onclick="savePi()">Lưu</button>
@@ -115,16 +123,22 @@ function card(v){
   const thumb=v.type==='ddns'&&online
     ? `<div class="thumb" style="background-image:url('${v.thumb_url}?t=${Date.now()}')"></div>`
     : `<div class="thumb"><span class="noimg">${online?'(sân Pi)':'offline'}</span></div>`;
-  const del=v.type==='pi'?`<button class="btn sm danger" onclick="delPi(${v.id})">✕</button>`:'';
+  const del=v.type==='pi'?`<button class="btn sm danger" onclick="delPi(${v.id})" title="Xoá">✕</button>`:'';
+  const warn=(v.type==='pi'&&!v.has_public)
+    ? `<div class="cams" style="color:#fbbf24">⚠ chưa có URL công khai — link dùng IP Tailscale (chỉ trong tailnet)</div>`:'';
   return `<div class="card">
     ${thumb}
     <div class="cbody">
       <div class="cname">${dot}${v.name} ${tag}</div>
       <div class="chost">${v.host}</div>
-      ${cams}
+      ${cams}${warn}
       <div class="btns">
         <a class="btn" href="${v.admin_url}" target="_blank">Admin</a>
         <a class="btn primary" href="${v.clip_url}" target="_blank">Clip khách</a>
+      </div>
+      <div class="btns">
+        <button class="btn sm" onclick="copyUrl('${v.clip_url}',this)" title="Copy link khách">📋 Copy link khách</button>
+        ${v.type==='pi'?`<button class="btn sm" onclick="editPi(${v.id})" title="Sửa">✎</button>`:''}
         ${del}
       </div>
     </div>
@@ -137,25 +151,47 @@ async function load(){
     $('#counts').textContent=`${d.counts.total} sân · ${d.counts.ddns} DDNS · ${d.counts.pi} Pi`;
     const ddns=d.venues.filter(v=>v.type==='ddns');
     const pi=d.venues.filter(v=>v.type==='pi');
+    try{PI_CACHE=await api('/api/pi-venues');}catch(e){}
     $('#ddns-grid').innerHTML=ddns.length?ddns.map(card).join(''):'<div class="empty">Chưa có sân DDNS. Bấm "+ Thêm NVR DDNS" để thêm đầu thu qua recorder.</div>';
     $('#pi-grid').innerHTML=pi.length?pi.map(card).join(''):'<div class="empty">Chưa có sân Pi nào.</div>';
   }catch(e){ $('#ddns-grid').innerHTML=`<div class="empty">Lỗi: ${e.message}</div>`; }
 }
 
-function openPiModal(){$('#pi-modal').classList.add('show');}
+let EDIT_PI_ID=null, PI_CACHE=[];
+function openPiModal(){EDIT_PI_ID=null;
+  ['pv-name','pv-host','pv-note','pv-clipurl','pv-adminurl'].forEach(i=>$('#'+i).value='');
+  $('#pv-rport').value=9997;$('#pv-cport').value=9996;
+  $('#pi-modal').classList.add('show');}
 function closePiModal(){$('#pi-modal').classList.remove('show');}
+async function editPi(id){
+  if(!PI_CACHE.length) PI_CACHE=await api('/api/pi-venues');
+  const v=PI_CACHE.find(x=>x.id===id); if(!v){alert('Không thấy sân');return;}
+  EDIT_PI_ID=id;
+  $('#pv-name').value=v.name||'';$('#pv-host').value=v.host||'';
+  $('#pv-clipurl').value=v.public_clip_url||'';$('#pv-adminurl').value=v.public_admin_url||'';
+  $('#pv-rport').value=v.recorder_port||9997;$('#pv-cport').value=v.clip_port||9996;
+  $('#pv-note').value=v.note||'';
+  $('#pi-modal').classList.add('show');
+}
 async function savePi(){
   const body={name:$('#pv-name').value.trim(),host:$('#pv-host').value.trim(),
     recorder_port:parseInt($('#pv-rport').value)||9997,
-    clip_port:parseInt($('#pv-cport').value)||9996,note:$('#pv-note').value.trim()};
+    clip_port:parseInt($('#pv-cport').value)||9996,note:$('#pv-note').value.trim(),
+    public_clip_url:$('#pv-clipurl').value.trim(),
+    public_admin_url:$('#pv-adminurl').value.trim()};
   if(!body.name||!body.host){alert('Nhập tên + host');return;}
-  try{await api('/api/pi-venues',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    closePiModal();['pv-name','pv-host','pv-note'].forEach(i=>$('#'+i).value='');load();}
-  catch(e){alert('Lỗi: '+e.message);}
+  try{
+    if(EDIT_PI_ID) await api('/api/pi-venues/'+EDIT_PI_ID,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    else await api('/api/pi-venues',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    closePiModal();load();
+  }catch(e){alert('Lỗi: '+e.message);}
 }
 async function delPi(id){
   if(!confirm('Xoá sân Pi này khỏi hub? (không ảnh hưởng Pi)'))return;
   await api('/api/pi-venues/'+id,{method:'DELETE'});load();
+}
+function copyUrl(u,btn){
+  navigator.clipboard.writeText(u).then(()=>{const t=btn.textContent;btn.textContent='✓ Đã copy';setTimeout(()=>btn.textContent=t,1500);});
 }
 load();
 setInterval(load,30000);

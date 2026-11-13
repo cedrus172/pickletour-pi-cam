@@ -66,6 +66,17 @@ def _hub_db():
         note TEXT DEFAULT '',
         created_at REAL NOT NULL
     )""")
+    # URL công khai (vd Cloudflare qtrung.pickletour.vn). Trống → fallback
+    # http://<tailscale-ip>:<port> (chỉ chạy trong tailnet).
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(pi_venues)").fetchall()}
+        if "public_clip_url" not in cols:
+            conn.execute("ALTER TABLE pi_venues ADD COLUMN public_clip_url TEXT DEFAULT ''")
+        if "public_admin_url" not in cols:
+            conn.execute("ALTER TABLE pi_venues ADD COLUMN public_admin_url TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass
     return conn
 
 
@@ -138,7 +149,8 @@ def _probe_pi(pv: dict) -> dict:
 # ---------------------------------------------------------------------------
 @app.context_processor
 def _inject():
-    return {"build_label": BUILD_LABEL}
+    return {"build_label": BUILD_LABEL,
+            "admin_base": ADMIN_BASE or ""}
 
 
 @app.route("/")
@@ -186,13 +198,17 @@ def api_venues():
     for r in pi_rows:
         pv = dict(r)
         st = _probe_pi(pv)
+        pub_clip = (pv.get("public_clip_url") or "").strip()
+        pub_admin = (pv.get("public_admin_url") or "").strip()
         venues.append({
             "type": "pi", "id": pv["id"], "name": pv["name"],
             "slug": pv["slug"], "host": pv["host"],
             "online": st["online"], "note": pv.get("note", ""),
-            "admin_url": f"http://{pv['host']}:{pv['recorder_port']}/",
-            "clip_url": f"http://{pv['host']}:{pv['clip_port']}/",
-            "thumb_url": f"http://{pv['host']}:{pv['recorder_port']}/",
+            # Ưu tiên URL công khai (Cloudflare…); fallback Tailscale IP
+            "admin_url": pub_admin or f"http://{pv['host']}:{pv['recorder_port']}/",
+            "clip_url": pub_clip or f"http://{pv['host']}:{pv['clip_port']}/",
+            "has_public": bool(pub_clip or pub_admin),
+            "thumb_url": "",
         })
 
     return jsonify({"venues": venues, "build": BUILD_LABEL,
@@ -243,14 +259,37 @@ def api_pi_add():
             n += 1
             slug = f"{base}-{n}"
         cur = conn.execute(
-            "INSERT INTO pi_venues (name,slug,host,recorder_port,clip_port,note,created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO pi_venues (name,slug,host,recorder_port,clip_port,note,"
+            "public_clip_url,public_admin_url,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
             (name, slug, host, int(data.get("recorder_port", PI_RECORDER_PORT)),
              int(data.get("clip_port", PI_CLIP_PORT)), data.get("note", ""),
+             (data.get("public_clip_url") or "").strip(),
+             (data.get("public_admin_url") or "").strip(),
              time.time()))
         conn.commit()
         vid = cur.lastrowid
     return jsonify({"id": vid, "slug": slug})
+
+
+@app.patch("/api/pi-venues/<int:vid>")
+def api_pi_edit(vid):
+    data = request.get_json(silent=True) or {}
+    sets, vals = [], []
+    for k in ("name", "host", "recorder_port", "clip_port", "note",
+              "public_clip_url", "public_admin_url"):
+        if k in data:
+            v = data[k]
+            if k in ("recorder_port", "clip_port"):
+                try: v = int(v)
+                except Exception: continue
+            sets.append(f"{k}=?"); vals.append(v)
+    if not sets:
+        return jsonify({"error": "nothing to update"}), 400
+    vals.append(vid)
+    with _hub_db() as conn:
+        conn.execute(f"UPDATE pi_venues SET {','.join(sets)} WHERE id=?", vals)
+        conn.commit()
+    return jsonify({"ok": True})
 
 
 @app.delete("/api/pi-venues/<int:vid>")
