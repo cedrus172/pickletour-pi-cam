@@ -16,6 +16,9 @@ RUN_USER="${RUN_USER:-pitail}"
 HUB_PORT="${HUB_PORT:-9995}"
 RECORDER_PORT="${RECORDER_PORT:-9997}"
 CLIP_PORT="${CLIP_PORT:-9996}"
+# Base URL cho link Admin/Clip (để trống = dùng http://<ip>:<port>)
+ADMIN_BASE="${ADMIN_BASE:-}"
+CLIP_BASE="${CLIP_BASE:-}"
 
 say(){ printf "\033[1;36m» %s\033[0m\n" "$*"; }
 ok(){ printf "\033[1;32m✓ %s\033[0m\n" "$*"; }
@@ -60,6 +63,8 @@ install_unit(){ # $1 = service basename, $2 = extra sed
       -e "s|__HUB_PORT__|$HUB_PORT|g" \
       -e "s|__RECORDER_PORT__|$RECORDER_PORT|g" \
       -e "s|__CLIP_PORT__|$CLIP_PORT|g" \
+      -e "s|__ADMIN_BASE__|$ADMIN_BASE|g" \
+      -e "s|__CLIP_BASE__|$CLIP_BASE|g" \
       "$INSTALL_DIR/$svc.service" > "/etc/systemd/system/$svc.service"
 }
 

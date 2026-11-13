@@ -34,6 +34,12 @@ app = Flask(__name__, template_folder=str(BASE_DIR / "templates"),
 # Cổng recorder/clip chạy NGAY TRÊN VPS này (phục vụ sân DDNS)
 LOCAL_RECORDER_PORT = int(os.environ.get("PT_RECORDER_PORT", "9997"))
 LOCAL_CLIP_PORT = int(os.environ.get("PT_CLIP_PORT", "9996"))
+# Base URL cho link Admin/Clip của sân DDNS. Nếu đặt (vd qua domain HTTPS)
+# thì dùng thẳng; nếu trống → fallback http://<host client đang vào>:<port>.
+#   PT_ADMIN_BASE=https://nvr.pickletour.vn
+#   PT_CLIP_BASE=https://clip.pickletour.vn
+ADMIN_BASE = os.environ.get("PT_ADMIN_BASE", "").rstrip("/")
+CLIP_BASE = os.environ.get("PT_CLIP_BASE", "").rstrip("/")
 # Pi mặc định dùng port nào (đồng nhất toàn hệ thống)
 PI_RECORDER_PORT = int(os.environ.get("PT_PI_RECORDER_PORT", "9997"))
 PI_CLIP_PORT = int(os.environ.get("PT_PI_CLIP_PORT", "9996"))
@@ -167,8 +173,10 @@ def api_venues():
             "error": st.get("error", ""),
             "cams_total": st.get("cams_total"),
             "cams_online": st.get("cams_online"),
-            "admin_url": f"http://{host_for_links}:{LOCAL_RECORDER_PORT}/",
-            "clip_url": f"http://{host_for_links}:{LOCAL_CLIP_PORT}/san/{slug}",
+            "admin_url": (f"{ADMIN_BASE}/" if ADMIN_BASE
+                          else f"http://{host_for_links}:{LOCAL_RECORDER_PORT}/"),
+            "clip_url": (f"{CLIP_BASE}/san/{slug}" if CLIP_BASE
+                         else f"http://{host_for_links}:{LOCAL_CLIP_PORT}/san/{slug}"),
             "thumb_url": f"/api/venue/ddns/{nvr['id']}/thumb",
         })
 

@@ -12,6 +12,8 @@ Environment=PT_DATA_DIR=__INSTALL_DIR__/data
 Environment=PT_HUB_PORT=__HUB_PORT__
 Environment=PT_RECORDER_PORT=__RECORDER_PORT__
 Environment=PT_CLIP_PORT=__CLIP_PORT__
+Environment=PT_ADMIN_BASE=__ADMIN_BASE__
+Environment=PT_CLIP_BASE=__CLIP_BASE__
 ExecStart=__INSTALL_DIR__/.venv/bin/python __INSTALL_DIR__/hub.py --host 0.0.0.0 --port __HUB_PORT__
 Restart=on-failure
 RestartSec=3
