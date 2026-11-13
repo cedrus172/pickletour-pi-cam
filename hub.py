@@ -185,8 +185,8 @@ def api_venues():
             "error": st.get("error", ""),
             "cams_total": st.get("cams_total"),
             "cams_online": st.get("cams_online"),
-            "admin_url": (f"{ADMIN_BASE}/" if ADMIN_BASE
-                          else f"http://{host_for_links}:{LOCAL_RECORDER_PORT}/"),
+            "admin_url": (f"{ADMIN_BASE}/?nvr={nvr['id']}" if ADMIN_BASE
+                          else f"http://{host_for_links}:{LOCAL_RECORDER_PORT}/?nvr={nvr['id']}"),
             "clip_url": (f"{CLIP_BASE}/san/{slug}" if CLIP_BASE
                          else f"http://{host_for_links}:{LOCAL_CLIP_PORT}/san/{slug}"),
             "thumb_url": f"/api/venue/ddns/{nvr['id']}/thumb",

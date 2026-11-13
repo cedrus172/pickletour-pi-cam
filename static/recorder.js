@@ -88,6 +88,30 @@ async function loadNvrs() {
     $$("span[data-dash]").forEach((b) => {
       b.onclick = () => openDashModal(parseInt(b.dataset.dash));
     });
+    _applyNvrDeepLink();
+  }
+}
+
+// Deep-link: ?nvr=<id> hoặc ?nvr=<slug> → tự chọn NVR + cuộn tới (1 lần).
+let _deepLinkDone = false;
+function _applyNvrDeepLink() {
+  if (_deepLinkDone) return;
+  const q = new URLSearchParams(location.search).get("nvr");
+  if (!q) { _deepLinkDone = true; return; }
+  const slug = s => (s||"").toLowerCase()
+    .replace(/đ/g,"d").replace(/ă|â|á|à/g,"a").replace(/ê|é|è/g,"e")
+    .replace(/ô|ơ|ó|ò/g,"o").replace(/ư|ú|ù/g,"u")
+    .replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"");
+  const n = NVRS.find(x => String(x.id) === q) || NVRS.find(x => slug(x.name) === q);
+  if (!n) { _deepLinkDone = true; return; }
+  _deepLinkDone = true;
+  const el = $(`.nvr-item[data-id="${n.id}"]`);
+  if (el) {
+    CUR_NVR = n;
+    $("#cur-nvr").textContent = n.name;
+    $$(".nvr-item").forEach(x => x.classList.remove("active"));
+    el.classList.add("active");
+    el.scrollIntoView({behavior:"smooth", block:"center"});
   }
 }
 
