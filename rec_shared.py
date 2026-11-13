@@ -75,7 +75,10 @@ def db():
         cols = {r[1] for r in conn.execute("PRAGMA table_info(nvrs)").fetchall()}
         if "vendor" not in cols:
             conn.execute("ALTER TABLE nvrs ADD COLUMN vendor TEXT DEFAULT 'dahua'")
-            conn.commit()
+        # web_port: cổng HTTP của ISAPI/CGI (DDNS NVR thường dùng 81, không 80).
+        if "web_port" not in cols:
+            conn.execute("ALTER TABLE nvrs ADD COLUMN web_port INTEGER DEFAULT 80")
+        conn.commit()
     except Exception:
         pass
     conn.execute("""CREATE TABLE IF NOT EXISTS channels (
@@ -243,6 +246,7 @@ def get_channel(cid: int) -> dict | None:
                        COALESCE(c.camera_user, '') AS camera_user,
                        COALESCE(c.camera_password, '') AS camera_password,
                        COALESCE(n.vendor, 'dahua') AS vendor,
+                       COALESCE(n.web_port, 80) AS web_port,
                        COALESCE(n.clip_watermark, '') AS clip_watermark,
                        COALESCE(n.clip_wm_pos, 'bl')  AS clip_wm_pos,
                        COALESCE(n.clip_wm_scroll, 0)  AS clip_wm_scroll,
@@ -268,6 +272,7 @@ def get_channel(cid: int) -> dict | None:
     d.setdefault("clip_wm_size", 40)
     d.setdefault("clip_encoder", "libx264")
     d.setdefault("vendor", "dahua")
+    d.setdefault("web_port", 80)
     d.setdefault("camera_host", "")
     d.setdefault("camera_user", "")
     d.setdefault("camera_password", "")
@@ -489,7 +494,8 @@ def dahua_fast_clip(nvr_host: str, user: str, password: str,
                     wm_scroll: int = 0, wm_size: int = 40,
                     encoder: str = "copy",
                     vendor: str = "dahua",
-                    rtsp_port: int = 554) -> tuple[bool, str]:
+                    rtsp_port: int = 554,
+                    web_port: int = 80) -> tuple[bool, str]:
     """Vendor-aware fast clip extraction.
     Dahua: loadfile.cgi binary stream + ffmpeg remux (very fast, LAN speed).
     Hikvision: RTSP playback /Streaming/tracks/{ch}01?start=...&end=... (~realtime).
@@ -497,7 +503,7 @@ def dahua_fast_clip(nvr_host: str, user: str, password: str,
     if (vendor or "").lower() in ("hikvision", "hik"):
         import vendors as _v
         nvr = {"host": nvr_host, "user": user, "password": password,
-               "vendor": "hikvision", "rtsp_port": rtsp_port}
+               "vendor": "hikvision", "rtsp_port": rtsp_port, "web_port": web_port}
         return _v.fast_clip_hik(nvr, channel, start_str, end_str, out_path,
                                 progress_cb=progress_cb, watermark=watermark,
                                 wm_pos=wm_pos, wm_scroll=wm_scroll,
@@ -505,7 +511,7 @@ def dahua_fast_clip(nvr_host: str, user: str, password: str,
     import requests
     from requests.auth import HTTPDigestAuth
 
-    url = (f"http://{nvr_host}/cgi-bin/loadfile.cgi?action=startLoad"
+    url = (f"http://{nvr_host}:{web_port}/cgi-bin/loadfile.cgi?action=startLoad"
            f"&channel={channel}"
            f"&startTime={start_str.replace(' ', '%20')}"
            f"&endTime={end_str.replace(' ', '%20')}")
@@ -689,13 +695,16 @@ def _dahua_snapshot_bytes(ch: dict, timeout: float) -> bytes:
         "user": ch["user"],
         "password": ch["password"],
         "vendor": ch.get("vendor", "dahua"),
+        "web_port": ch.get("web_port", 80),
     }
     cam_host = (ch.get("camera_host") or "").strip()
     if (cam_host and nvr["vendor"] == "hikvision"
             and _v._cam_reachable_from_nvr_lan(nvr["host"], cam_host)):
         cam_user = (ch.get("camera_user") or ch["user"]).strip() or ch["user"]
         cam_pw = ch.get("camera_password") or ch["password"]
-        cam_nvr = {**nvr, "host": cam_host, "user": cam_user, "password": cam_pw}
+        # cam direct dùng port 80 riêng của cam, không phải web_port của NVR
+        cam_nvr = {**nvr, "host": cam_host, "user": cam_user,
+                   "password": cam_pw, "web_port": 80}
         b = _v.snapshot_bytes(cam_nvr, 1, timeout)
         if b:
             return b
@@ -803,7 +812,8 @@ def _list_capture_targets() -> list:
                            n.host AS nvr_host, n.rtsp_port,
                            n.user, n.password,
                            COALESCE(c.camera_host, '') AS camera_host,
-                           COALESCE(n.vendor, 'dahua') AS vendor
+                           COALESCE(n.vendor, 'dahua') AS vendor,
+                           COALESCE(n.web_port, 80) AS web_port
                     FROM channels c JOIN nvrs n ON c.nvr_id = n.id
                 """).fetchall()
             except sqlite3.OperationalError:
@@ -817,6 +827,7 @@ def _list_capture_targets() -> list:
         for r in rows:
             d = dict(r)
             d.setdefault("vendor", "dahua")
+            d.setdefault("web_port", 80)
             out.append(d)
         return out
     except Exception:

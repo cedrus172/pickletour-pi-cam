@@ -80,7 +80,7 @@ def snapshot_bytes(nvr: dict, channel: int, timeout: float = 4.0) -> bytes:
 
 
 def _dahua_snapshot_bytes(nvr: dict, channel: int, timeout: float) -> bytes:
-    url = f"http://{nvr['host']}/cgi-bin/snapshot.cgi?channel={channel}&type=1"
+    url = f"http://{nvr['host']}:{nvr.get('web_port') or 80}/cgi-bin/snapshot.cgi?channel={channel}&type=1"
     try:
         r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
                          timeout=timeout)
@@ -94,7 +94,7 @@ def _dahua_snapshot_bytes(nvr: dict, channel: int, timeout: float) -> bytes:
 def _hik_snapshot_bytes(nvr: dict, channel: int, timeout: float) -> bytes:
     # Hik: ch 1 → "101" (channel 1, stream 01=main). Sub: "102".
     for stream_suffix in ("01", "02"):
-        url = (f"http://{nvr['host']}/ISAPI/Streaming/channels/"
+        url = (f"http://{nvr['host']}:{nvr.get('web_port') or 80}/ISAPI/Streaming/channels/"
                f"{channel}{stream_suffix}/picture")
         try:
             r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
@@ -212,7 +212,7 @@ def test_connection(nvr: dict, timeout: float = 8.0) -> dict:
 
 
 def _dahua_device_info(nvr: dict, timeout: float) -> dict:
-    url = f"http://{nvr['host']}/cgi-bin/magicBox.cgi?action=getDeviceType"
+    url = f"http://{nvr['host']}:{nvr.get('web_port') or 80}/cgi-bin/magicBox.cgi?action=getDeviceType"
     try:
         r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
                          timeout=timeout, verify=False)
@@ -226,7 +226,7 @@ def _dahua_device_info(nvr: dict, timeout: float) -> dict:
 
 
 def _hik_device_info(nvr: dict, timeout: float) -> dict:
-    url = f"http://{nvr['host']}/ISAPI/System/deviceInfo"
+    url = f"http://{nvr['host']}:{nvr.get('web_port') or 80}/ISAPI/System/deviceInfo"
     try:
         r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
                          timeout=timeout, verify=False)
@@ -260,7 +260,7 @@ def list_channels(nvr: dict, timeout: float = 10.0) -> list:
 
 def _dahua_list_channel_titles(host, user, pw, timeout=10.0) -> list:
     """Dahua table.ChannelTitle[N].Name=..."""
-    url = (f"http://{host}/cgi-bin/configManager.cgi"
+    url = (f"http://{host}:{nvr.get('web_port') or 80}/cgi-bin/configManager.cgi"
            f"?action=getConfig&name=ChannelTitle")
     try:
         r = requests.get(url, auth=HTTPDigestAuth(user, pw), timeout=timeout,
@@ -291,7 +291,7 @@ def _hik_list_channels(nvr: dict, timeout: float) -> list:
     # Query online status map từ /channels/status (chỉ Hik NVR)
     online_map = {}
     try:
-        r = requests.get(f"http://{host}/ISAPI/ContentMgmt/InputProxy/channels/status",
+        r = requests.get(f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/ContentMgmt/InputProxy/channels/status",
                          auth=auth, timeout=timeout, verify=False)
         if r.status_code == 200:
             sroot = ET.fromstring(r.text)
@@ -310,7 +310,7 @@ def _hik_list_channels(nvr: dict, timeout: float) -> list:
         ("/ISAPI/ContentMgmt/InputProxy/channels", "InputProxyChannel"),
         ("/ISAPI/System/Video/inputs/channels", "VideoInputChannel"),
     ):
-        url = f"http://{host}{path}"
+        url = f"http://{host}:{nvr.get('web_port') or 80}{path}"
         try:
             r = requests.get(url, auth=auth, timeout=timeout, verify=False)
             if r.status_code != 200:
@@ -350,7 +350,7 @@ def fetch_osd_all(nvr: dict, timeout: float = 15.0) -> list:
 
 
 def _dahua_fetch_osd_all(nvr: dict, timeout: float) -> list:
-    url = (f"http://{nvr['host']}/cgi-bin/configManager.cgi"
+    url = (f"http://{nvr['host']}:{nvr.get('web_port') or 80}/cgi-bin/configManager.cgi"
            f"?action=getConfig&name=VideoWidget")
     try:
         r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
@@ -411,7 +411,7 @@ def _hik_fetch_osd_all(nvr: dict, timeout: float) -> list:
 
 def _hik_fetch_overlay(nvr: dict, channel: int, timeout: float) -> dict:
     """GET /ISAPI/System/Video/inputs/channels/{ch}/overlays → dict."""
-    url = (f"http://{nvr['host']}/ISAPI/System/Video/inputs/channels/"
+    url = (f"http://{nvr['host']}:{nvr.get('web_port') or 80}/ISAPI/System/Video/inputs/channels/"
            f"{channel}/overlays")
     out = {"channel_title_on": None, "datetime_on": None, "channel_name": ""}
     try:
@@ -435,7 +435,7 @@ def _hik_fetch_overlay(nvr: dict, channel: int, timeout: float) -> dict:
     # Channel name từ /ISAPI/System/Video/inputs/channels/{ch} (input chan tag)
     try:
         r2 = requests.get(
-            f"http://{nvr['host']}/ISAPI/System/Video/inputs/channels/{channel}",
+            f"http://{nvr['host']}:{nvr.get('web_port') or 80}/ISAPI/System/Video/inputs/channels/{channel}",
             auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
             timeout=timeout, verify=False)
         if r2.status_code == 200:
@@ -477,7 +477,7 @@ def _dahua_apply_osd_bulk(nvr: dict, changes: list, timeout: float) -> dict:
     if not params:
         return {"ok": True, "applied": 0, "errors": []}
     encoded = [p.replace("[", "%5B").replace("]", "%5D") for p in params]
-    url = (f"http://{nvr['host']}/cgi-bin/configManager.cgi?action=setConfig&"
+    url = (f"http://{nvr['host']}:{nvr.get('web_port') or 80}/cgi-bin/configManager.cgi?action=setConfig&"
            + "&".join(encoded))
     try:
         r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
@@ -516,7 +516,7 @@ def _hik_set_channel_osd(nvr: dict, channel: int, change: dict,
     host = nvr["host"]
     # 1. Overlay toggles (channel_title, time_title)
     if "channel_title" in change or "time_title" in change:
-        url = f"http://{host}/ISAPI/System/Video/inputs/channels/{channel}/overlays"
+        url = f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/System/Video/inputs/channels/{channel}/overlays"
         try:
             r = requests.get(url, auth=auth, timeout=timeout, verify=False)
             if r.status_code != 200:
@@ -541,7 +541,7 @@ def _hik_set_channel_osd(nvr: dict, channel: int, change: dict,
     if change.get("channel_name"):
         new_name = str(change["channel_name"])
         # Thử input channel (DVR) trước
-        url = f"http://{host}/ISAPI/System/Video/inputs/channels/{channel}"
+        url = f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/System/Video/inputs/channels/{channel}"
         try:
             r = requests.get(url, auth=auth, timeout=timeout, verify=False)
             if r.status_code == 200 and "<name>" in r.text:
@@ -555,7 +555,7 @@ def _hik_set_channel_osd(nvr: dict, channel: int, change: dict,
                     return False, f"PUT name HTTP {r.status_code}: {r.text[:200]}"
             else:
                 # NVR proxy path
-                url2 = f"http://{host}/ISAPI/ContentMgmt/InputProxy/channels/{channel}"
+                url2 = f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/ContentMgmt/InputProxy/channels/{channel}"
                 r = requests.get(url2, auth=auth, timeout=timeout, verify=False)
                 if r.status_code != 200:
                     return False, f"GET channel HTTP {r.status_code}"
@@ -606,7 +606,7 @@ def _hik_isapi_download(nvr: dict, channel: int, start_human: str,
             f'xmlns="http://www.hikvision.com/ver20/XMLSchema">\n'
             f'  <playbackURI>{_xml_escape(playback_uri)}</playbackURI>\n'
             f'</downloadRequest>\n')
-    url = f"http://{host}/ISAPI/ContentMgmt/download"
+    url = f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/ContentMgmt/download"
     received = 0
     try:
         with requests.post(url, data=body.encode("utf-8"),
@@ -779,7 +779,7 @@ def system_info_hik(nvr: dict, timeout: float = 8.0) -> dict:
     out = {"ok": False, "nvr_time": "", "drift_seconds": None,
            "pi_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     try:
-        r = requests.get(f"http://{nvr['host']}/ISAPI/System/deviceInfo",
+        r = requests.get(f"http://{nvr['host']}:{nvr.get('web_port') or 80}/ISAPI/System/deviceInfo",
                          auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
                          timeout=timeout, verify=False)
         if r.status_code != 200:
@@ -793,7 +793,7 @@ def system_info_hik(nvr: dict, timeout: float = 8.0) -> dict:
         return {**out, "error": f"deviceInfo: {e}"}
     # Time
     try:
-        r = requests.get(f"http://{nvr['host']}/ISAPI/System/time",
+        r = requests.get(f"http://{nvr['host']}:{nvr.get('web_port') or 80}/ISAPI/System/time",
                          auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
                          timeout=timeout, verify=False)
         if r.status_code == 200:
@@ -827,7 +827,7 @@ def sync_time_hik(nvr: dict, timeout: float = 10.0) -> dict:
             f'  <timeZone>CST-7:00:00</timeZone>\n'
             f'</Time>\n')
     try:
-        r = requests.put(f"http://{nvr['host']}/ISAPI/System/time",
+        r = requests.put(f"http://{nvr['host']}:{nvr.get('web_port') or 80}/ISAPI/System/time",
                          data=body.encode("utf-8"),
                          headers={"Content-Type": "application/xml"},
                          auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
@@ -843,7 +843,7 @@ def sync_time_hik(nvr: dict, timeout: float = 10.0) -> dict:
 def reboot_hik(nvr: dict, timeout: float = 5.0) -> dict:
     """Reboot NVR qua ISAPI. Thường drop connection trước khi trả → treat OK."""
     try:
-        r = requests.put(f"http://{nvr['host']}/ISAPI/System/reboot",
+        r = requests.put(f"http://{nvr['host']}:{nvr.get('web_port') or 80}/ISAPI/System/reboot",
                          auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
                          timeout=timeout, verify=False)
         return {"ok": r.status_code in (200, 201),
@@ -858,7 +858,7 @@ def storage_hik(nvr: dict, timeout: float = 10.0) -> dict:
     used_gb, used_pct}]}. Hik endpoint: /ISAPI/ContentMgmt/Storage."""
     import xml.etree.ElementTree as ET
     try:
-        r = requests.get(f"http://{nvr['host']}/ISAPI/ContentMgmt/Storage",
+        r = requests.get(f"http://{nvr['host']}:{nvr.get('web_port') or 80}/ISAPI/ContentMgmt/Storage",
                          auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
                          timeout=timeout, verify=False)
         if r.status_code != 200:
@@ -902,7 +902,7 @@ def image_get_hik(nvr: dict, channel: int, timeout: float = 8.0) -> dict:
            "saturation": 50, "hue": 50, "gamma": 50, "style": "Standard",
            "day_night_mode": 0}
     try:
-        r = requests.get(f"http://{host}/ISAPI/Image/channels/{channel}/color",
+        r = requests.get(f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/Image/channels/{channel}/color",
                          auth=auth, timeout=timeout, verify=False)
         if r.status_code == 200:
             root = ET.fromstring(r.text)
@@ -918,7 +918,7 @@ def image_get_hik(nvr: dict, channel: int, timeout: float = 8.0) -> dict:
         pass
     # IrcutFilter
     try:
-        r = requests.get(f"http://{host}/ISAPI/Image/channels/{channel}/ircutfilter",
+        r = requests.get(f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/Image/channels/{channel}/ircutfilter",
                          auth=auth, timeout=timeout, verify=False)
         if r.status_code == 200:
             root = ET.fromstring(r.text)
@@ -944,7 +944,7 @@ def image_set_hik(nvr: dict, channel: int, changes: dict,
     color_changes = {k: v for k, v in changes.items() if k in color_keys}
     if color_changes:
         try:
-            r = requests.get(f"http://{host}/ISAPI/Image/channels/{channel}/color",
+            r = requests.get(f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/Image/channels/{channel}/color",
                              auth=auth, timeout=timeout, verify=False)
             if r.status_code != 200:
                 errors.append(f"GET color HTTP {r.status_code}")
@@ -956,7 +956,7 @@ def image_set_hik(nvr: dict, channel: int, changes: dict,
                         xml = re.sub(rf"<{tag}>[^<]*</{tag}>",
                                      f"<{tag}>{v}</{tag}>", xml)
                         applied.append(k)
-                r = requests.put(f"http://{host}/ISAPI/Image/channels/{channel}/color",
+                r = requests.put(f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/Image/channels/{channel}/color",
                                  data=xml.encode("utf-8"),
                                  headers={"Content-Type": "application/xml"},
                                  auth=auth, timeout=timeout, verify=False)
@@ -974,7 +974,7 @@ def image_set_hik(nvr: dict, channel: int, changes: dict,
                     f'xmlns="http://www.hikvision.com/ver20/XMLSchema">\n'
                     f'  <IrcutFilterType>{mode_val}</IrcutFilterType>\n'
                     f'</IrcutFilter>\n')
-            r = requests.put(f"http://{host}/ISAPI/Image/channels/{channel}/ircutfilter",
+            r = requests.put(f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/Image/channels/{channel}/ircutfilter",
                              data=body.encode("utf-8"),
                              headers={"Content-Type": "application/xml"},
                              auth=auth, timeout=timeout, verify=False)
@@ -998,7 +998,7 @@ def record_get_all_hik(nvr: dict, timeout: float = 10.0) -> dict:
     host = nvr["host"]
     modes = {}
     try:
-        r = requests.get(f"http://{host}/ISAPI/ContentMgmt/record/tracks",
+        r = requests.get(f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/ContentMgmt/record/tracks",
                          auth=auth, timeout=timeout, verify=False)
         if r.status_code != 200:
             return {"ok": False, "modes": {},
@@ -1031,7 +1031,7 @@ def record_set_hik(nvr: dict, channel: int, mode: int,
     # mode 0 (auto) → đảm bảo manual stop để schedule control
     if int(mode) == 0:
         action = "stop"
-    url = (f"http://{host}/ISAPI/ContentMgmt/record/control/manual/"
+    url = (f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/ContentMgmt/record/control/manual/"
            f"{action}/tracks/{track}")
     try:
         r = requests.put(url, auth=auth, timeout=timeout, verify=False)
@@ -1063,7 +1063,7 @@ def logo_get_hik(nvr: dict, channel: int, timeout: float = 8.0) -> dict:
     out = {"channel": channel, "enabled": False, "text": "",
            "position": "br", "color": [255, 255, 255, 255]}
     try:
-        r = requests.get(f"http://{host}/ISAPI/System/Video/inputs/channels/{channel}/overlays",
+        r = requests.get(f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/System/Video/inputs/channels/{channel}/overlays",
                          auth=auth, timeout=timeout, verify=False)
         if r.status_code != 200:
             return out
@@ -1089,7 +1089,7 @@ def logo_set_hik(nvr: dict, channel: int, text: str, position: str = "br",
     auth = HTTPDigestAuth(nvr["user"], nvr["password"])
     host = nvr["host"]
     try:
-        r = requests.get(f"http://{host}/ISAPI/System/Video/inputs/channels/{channel}/overlays",
+        r = requests.get(f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/System/Video/inputs/channels/{channel}/overlays",
                          auth=auth, timeout=timeout, verify=False)
         if r.status_code != 200:
             return {"ok": False, "error": f"GET HTTP {r.status_code}"}
@@ -1121,7 +1121,7 @@ def logo_set_hik(nvr: dict, channel: int, text: str, position: str = "br",
         xml = re.sub(r"</TextOverlayList>", new_overlay + "</TextOverlayList>",
                      xml, count=1)
     try:
-        r = requests.put(f"http://{host}/ISAPI/System/Video/inputs/channels/{channel}/overlays",
+        r = requests.put(f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/System/Video/inputs/channels/{channel}/overlays",
                          data=xml.encode("utf-8"),
                          headers={"Content-Type": "application/xml"},
                          auth=auth, timeout=timeout, verify=False)
@@ -1147,7 +1147,7 @@ def encode_set_hik(nvr: dict, channel: int, main: str = "", sub: str = "",
             continue
         codec = new_codec.upper().replace(".", "")  # H264 / H265
         try:
-            r = requests.get(f"http://{host}/ISAPI/Streaming/channels/{channel}{suffix}",
+            r = requests.get(f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/Streaming/channels/{channel}{suffix}",
                              auth=auth, timeout=timeout, verify=False)
             if r.status_code != 200:
                 errors.append(f"{bucket} GET HTTP {r.status_code}")
@@ -1155,7 +1155,7 @@ def encode_set_hik(nvr: dict, channel: int, main: str = "", sub: str = "",
             xml = r.text
             xml = re.sub(r"<videoCodecType>[^<]*</videoCodecType>",
                          f"<videoCodecType>{codec}</videoCodecType>", xml)
-            r = requests.put(f"http://{host}/ISAPI/Streaming/channels/{channel}{suffix}",
+            r = requests.put(f"http://{host}:{nvr.get('web_port') or 80}/ISAPI/Streaming/channels/{channel}{suffix}",
                              data=xml.encode("utf-8"),
                              headers={"Content-Type": "application/xml"},
                              auth=auth, timeout=timeout, verify=False)
@@ -1179,7 +1179,7 @@ def get_encode_info(nvr: dict, channel: int, timeout: float = 10.0) -> dict:
 
 
 def _dahua_get_encode(nvr: dict, channel: int, timeout: float) -> dict:
-    url = f"http://{nvr['host']}/cgi-bin/configManager.cgi?action=getConfig&name=Encode"
+    url = f"http://{nvr['host']}:{nvr.get('web_port') or 80}/cgi-bin/configManager.cgi?action=getConfig&name=Encode"
     out = {"channel": channel, "main": {}, "sub": {}}
     try:
         r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
@@ -1211,7 +1211,7 @@ def _hik_get_encode(nvr: dict, channel: int, timeout: float) -> dict:
     auth = HTTPDigestAuth(nvr["user"], nvr["password"])
     out = {"channel": channel, "main": {}, "sub": {}}
     for suffix, bucket in (("01", "main"), ("02", "sub")):
-        url = f"http://{nvr['host']}/ISAPI/Streaming/channels/{channel}{suffix}"
+        url = f"http://{nvr['host']}:{nvr.get('web_port') or 80}/ISAPI/Streaming/channels/{channel}{suffix}"
         try:
             r = requests.get(url, auth=auth, timeout=timeout, verify=False)
             if r.status_code != 200:

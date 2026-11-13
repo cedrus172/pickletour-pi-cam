@@ -122,8 +122,14 @@
     <small style="color:var(--muted);font-size:11px;display:block;margin-top:-4px;margin-bottom:8px">
       Dahua → /cam/realmonitor &amp; loadfile.cgi. Hik → /Streaming/Channels/N01 &amp; /ISAPI.
     </small>
-    <label>Host: <input id="n-host" placeholder="192.168.1.246"></label>
-    <label>RTSP port: <input id="n-port" type="number" value="554"></label>
+    <label>Host: <input id="n-host" placeholder="192.168.1.246 hoặc pick.cameraddns.net"></label>
+    <div style="display:flex;gap:8px">
+      <label style="flex:1">Web port (HTTP): <input id="n-webport" type="number" value="80"></label>
+      <label style="flex:1">RTSP port: <input id="n-port" type="number" value="554"></label>
+    </div>
+    <small style="color:var(--muted);font-size:11px;display:block;margin:-4px 0 8px">
+      NVR tại chỗ (LAN): web 80, rtsp 554. NVR qua DDNS: dùng port đã map (vd web 81, rtsp 1554).
+    </small>
     <label>User: <input id="n-user" value="admin"></label>
     <label>Password: <input id="n-pass" type="password" placeholder=""></label>
     <small id="n-pass-hint" style="display:none;color:var(--muted);font-size:11px">

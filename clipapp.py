@@ -275,6 +275,7 @@ def _run_clip_bg(clip_id: str, ch: dict, start_str_dahua: str, end_str_dahua: st
         wm_size=wm_size, encoder=encoder,
         vendor=ch.get("vendor", "dahua"),
         rtsp_port=ch.get("rtsp_port", 554),
+        web_port=ch.get("web_port", 80),
     )
     if ok:
         with _clips_lock:

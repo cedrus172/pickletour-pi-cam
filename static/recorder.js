@@ -531,6 +531,7 @@ function openModal() {
   $("#n-title").textContent = "Thêm NVR";
   ["n-name","n-host","n-user","n-pass","n-wm"].forEach(id => $("#"+id).value = "");
   $("#n-port").value = 554; $("#n-ch").value = 16; $("#n-user").value = "admin";
+  $("#n-webport").value = 80;
   $("#n-vendor").value = "dahua";
   $("#n-wm-pos").value = "bl";
   $("#n-wm-size").value = "40";
@@ -549,6 +550,7 @@ function openEditModal(nid) {
   $("#n-name").value = n.name;
   $("#n-host").value = n.host;
   $("#n-port").value = n.rtsp_port;
+  $("#n-webport").value = n.web_port || 80;
   $("#n-user").value = n.user;
   $("#n-pass").value = "";
   $("#n-pass").placeholder = "(để trống nếu giữ nguyên)";
@@ -596,10 +598,13 @@ async function scanChannels() {
         hint.style.color = "var(--err,#e55)";
         return;
       }
+      // (web_port đưa vào payload bên dưới)
       resp = await api("/api/nvrs/scan-channels", {
         method: "POST",
         body: JSON.stringify({host, user, password: pw,
-                              vendor: $("#n-vendor").value}),
+                              vendor: $("#n-vendor").value,
+                              web_port: parseInt($("#n-webport").value) || 80,
+                              rtsp_port: parseInt($("#n-port").value) || 554}),
       });
     }
     renderScanResult(resp.channels || []);
@@ -740,6 +745,7 @@ async function saveNvr() {
     name: $("#n-name").value.trim(),
     host: $("#n-host").value.trim(),
     rtsp_port: parseInt($("#n-port").value),
+    web_port: parseInt($("#n-webport").value) || 80,
     user: $("#n-user").value.trim(),
     password: $("#n-pass").value,
     channels: parseInt($("#n-ch").value),

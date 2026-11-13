@@ -102,6 +102,9 @@ def _db():
     if "vendor" not in cols:
         # 'dahua' | 'hikvision' — chọn API backend
         conn.execute("ALTER TABLE nvrs ADD COLUMN vendor TEXT DEFAULT 'dahua'")
+    if "web_port" not in cols:
+        # Cổng HTTP của ISAPI/CGI (DDNS NVR thường 81, không 80)
+        conn.execute("ALTER TABLE nvrs ADD COLUMN web_port INTEGER DEFAULT 80")
     conn.execute("""CREATE TABLE IF NOT EXISTS channels (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nvr_id INTEGER NOT NULL,
@@ -168,9 +171,10 @@ def api_add_nvr():
         vendor = "dahua"
     with _db() as conn:
         cur = conn.execute(
-            "INSERT INTO nvrs (name,host,rtsp_port,user,password,channels,vendor,created_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO nvrs (name,host,rtsp_port,web_port,user,password,channels,vendor,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (data["name"], data["host"], int(data.get("rtsp_port", 554)),
+             int(data.get("web_port", 80)),
              data["user"], data["password"], int(data.get("channels", 16)),
              vendor, time.time()),
         )
@@ -193,8 +197,8 @@ def api_update_nvr(nid):
     data = request.get_json(silent=True) or {}
     sets, vals = [], []
     allow_empty = {"clip_watermark"}  # empty string = clear watermark
-    int_fields = {"rtsp_port", "channels", "clip_wm_scroll", "clip_wm_size"}
-    for k in ("name", "host", "rtsp_port", "user", "password", "channels",
+    int_fields = {"rtsp_port", "web_port", "channels", "clip_wm_scroll", "clip_wm_size"}
+    for k in ("name", "host", "rtsp_port", "web_port", "user", "password", "channels",
               "clip_watermark", "clip_wm_pos", "clip_wm_scroll", "clip_wm_size",
               "clip_source", "clip_encoder", "vendor"):
         if k not in data:
@@ -388,11 +392,11 @@ def _logo_set_params(ch_idx, text, position, color):
         out.insert(1, f"VideoWidget[{ch_idx}].CustomTitle[{LOGO_SLOT}].Text=")
     return out
 
-def _dahua_setconfig(host, user, password, params):
+def _dahua_setconfig(host, user, password, params, web_port=80):
     import requests
     from requests.auth import HTTPDigestAuth
     encoded = [p.replace("[", "%5B").replace("]", "%5D") for p in params]
-    url = (f"http://{host}/cgi-bin/configManager.cgi?action=setConfig&"
+    url = (f"http://{host}:{web_port}/cgi-bin/configManager.cgi?action=setConfig&"
            + "&".join(encoded))
     r = requests.get(url, auth=HTTPDigestAuth(user, password), timeout=15, verify=False)
     body = r.text.strip()
@@ -413,7 +417,7 @@ def api_get_logo(nid):
         import vendors as _v
         return jsonify(_v.logo_get_hik(nvr, int(request.args.get("channel", 1))))
     try:
-        r = requests.get(f"http://{nvr['host']}/cgi-bin/configManager.cgi?action=getConfig&name=VideoWidget[{channel}]",
+        r = requests.get(f"http://{nvr['host']}:{nvr.get('web_port') or 80}/cgi-bin/configManager.cgi?action=getConfig&name=VideoWidget[{channel}]",
                          auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
                          timeout=10, verify=False)
     except Exception as e:
@@ -534,7 +538,7 @@ def api_set_encode(nid):
         params.append(f"Encode[{channel}].ExtraFormat[0].Video.Compression={sub}")
     if not params:
         return jsonify({"error": "nothing to set (give main or sub)"}), 400
-    url = (f"http://{nvr['host']}/cgi-bin/configManager.cgi?action=setConfig&"
+    url = (f"http://{nvr['host']}:{nvr.get('web_port') or 80}/cgi-bin/configManager.cgi?action=setConfig&"
            + "&".join(params))
     try:
         r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
@@ -736,7 +740,7 @@ def _dahua_fastload(nvr: dict, channel: int, start_dt: str, end_dt: str,
     than RTSP playback — NVR pushes at disk speed, ~10-80 MB/s).
     Returns True on success. On any failure, caller should fall back to RTSP.
     """
-    url = f"http://{nvr['host']}/cgi-bin/loadfile.cgi"
+    url = f"http://{nvr['host']}:{nvr.get('web_port') or 80}/cgi-bin/loadfile.cgi"
     params = {
         "action": "startLoad",
         "channel": channel,
@@ -1200,10 +1204,10 @@ def api_delete_channel(cid):
 
 
 def _dahua_fetch_channel_titles(host: str, user: str, password: str,
-                                timeout: int = 10) -> list[dict]:
+                                timeout: int = 10, web_port: int = 80) -> list[dict]:
     """Gọi Dahua ChannelTitle API → trả về list [{channel, title}].
     channel là 1-based (hợp với format Pickletour đang dùng)."""
-    url = f"http://{host}/cgi-bin/configManager.cgi"
+    url = f"http://{host}:{web_port}/cgi-bin/configManager.cgi"
     r = requests.get(url, params={"action": "getConfig", "name": "ChannelTitle"},
                      auth=HTTPDigestAuth(user, password), timeout=timeout)
     r.raise_for_status()
@@ -1230,9 +1234,10 @@ def api_scan_channels_adhoc():
     if not host or not user or not pw:
         return jsonify({"error": "host, user, password required"}), 400
     nvr = {"host": host, "user": user, "password": pw, "vendor": vendor,
-           "channels": 16, "rtsp_port": 554}
+           "channels": 16, "rtsp_port": int(data.get("rtsp_port", 554)),
+           "web_port": int(data.get("web_port", 80))}
     try:
-        titles = _v.list_channels(nvr, timeout=10)
+        titles = _v.list_channels(nvr, timeout=12)
         return jsonify({"ok": True, "channels": titles, "vendor": vendor})
     except Exception as e:
         return jsonify({"error": f"NVR không trả lời: {e}"}), 502
@@ -1279,7 +1284,7 @@ def api_scan_channels(nid):
 def _dahua_cgi_get(nvr: dict, path: str, params: dict | None = None,
                    timeout: int = 10) -> tuple[int, str]:
     """GET /cgi-bin/<path> with Digest auth. Returns (status, text)."""
-    url = f"http://{nvr['host']}/cgi-bin/{path}"
+    url = f"http://{nvr['host']}:{nvr.get('web_port') or 80}/cgi-bin/{path}"
     r = requests.get(url, params=params or {},
                      auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
                      timeout=timeout, verify=False)
