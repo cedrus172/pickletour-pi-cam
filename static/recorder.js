@@ -687,9 +687,13 @@ function renderScanResult(channels) {
       ? "đã lưu — để trống để giữ"
       : "password của cam " + camHost;
     if (c.in_local) tr.style.background = "rgba(80,180,255,0.08)";
+    const isOnline = c.online !== false;
     const camBadge = camHost
       ? `<div style="font-size:10px;color:var(--ok,#4e4);font-family:var(--mono);margin-top:3px">direct: ${camHost}</div>`
       : `<div style="font-size:10px;color:var(--muted);margin-top:3px">via NVR</div>`;
+    const onlineBadge = isOnline
+      ? ""
+      : `<div style="font-size:10px;color:var(--danger,#f87171);margin-top:3px">⚠ cam OFFLINE</div>`;
     // Cam password field — chỉ hiện khi có cam_host (Hik proxy)
     const camPwRow = camHost
       ? `<div style="display:flex;gap:4px;margin-top:4px">
@@ -706,7 +710,7 @@ function renderScanResult(channels) {
         <input type="checkbox" class="scan-ck" data-ch="${c.channel}" ${checked}>
       </td>
       <td style="text-align:center;color:var(--muted);font-family:var(--mono)">
-        ${c.channel}${camBadge}
+        ${c.channel}${camBadge}${onlineBadge}
       </td>
       <td>
         <input type="text" class="scan-name" data-ch="${c.channel}"

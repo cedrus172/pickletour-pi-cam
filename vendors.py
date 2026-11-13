@@ -282,17 +282,37 @@ def _dahua_list_channel_titles(host, user, pw, timeout=10.0) -> list:
 def _hik_list_channels(nvr: dict, timeout: float) -> list:
     """Hik NVR: GET /ISAPI/ContentMgmt/InputProxy/channels (NVR proxy cam IP).
     DVR fallback: /ISAPI/System/Video/inputs/channels (local input).
-    Trả [{channel, title, camera_host}] — camera_host là IP riêng của cam
-    (dùng cho RTSP direct, bypass NVR transmux)."""
+    Trả [{channel, title, camera_host, online}] — camera_host là IP riêng của
+    cam (dùng cho RTSP direct, bypass NVR transmux), online=False khi cam
+    mất kết nối với NVR (cam tắt, mạng rớt, firmware hỏng)."""
+    host = nvr["host"]
+    auth = HTTPDigestAuth(nvr["user"], nvr["password"])
+
+    # Query online status map từ /channels/status (chỉ Hik NVR)
+    online_map = {}
+    try:
+        r = requests.get(f"http://{host}/ISAPI/ContentMgmt/InputProxy/channels/status",
+                         auth=auth, timeout=timeout, verify=False)
+        if r.status_code == 200:
+            sroot = ET.fromstring(r.text)
+            for st in _hfindall(sroot, "InputProxyChannelStatus"):
+                sid = _htext(st, "id")
+                if sid:
+                    try:
+                        online_map[int(sid)] = (_htext(st, "online") or "").lower() == "true"
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
+
     out = []
     for path, tag in (
         ("/ISAPI/ContentMgmt/InputProxy/channels", "InputProxyChannel"),
         ("/ISAPI/System/Video/inputs/channels", "VideoInputChannel"),
     ):
-        url = f"http://{nvr['host']}{path}"
+        url = f"http://{host}{path}"
         try:
-            r = requests.get(url, auth=HTTPDigestAuth(nvr["user"], nvr["password"]),
-                             timeout=timeout, verify=False)
+            r = requests.get(url, auth=auth, timeout=timeout, verify=False)
             if r.status_code != 200:
                 continue
             root = ET.fromstring(r.text)
@@ -305,8 +325,7 @@ def _hik_list_channels(nvr: dict, timeout: float) -> list:
                 except ValueError:
                     continue
                 entry = {"channel": cid, "title": _htext(el, "name").strip(),
-                         "camera_host": ""}
-                # sourceInputPortDescriptor có ipAddress của cam
+                         "camera_host": "", "online": online_map.get(cid, True)}
                 src = _hfind(el, "sourceInputPortDescriptor")
                 if src is not None:
                     ip = _htext(src, "ipAddress").strip()
