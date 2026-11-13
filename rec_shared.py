@@ -691,7 +691,8 @@ def _dahua_snapshot_bytes(ch: dict, timeout: float) -> bytes:
         "vendor": ch.get("vendor", "dahua"),
     }
     cam_host = (ch.get("camera_host") or "").strip()
-    if cam_host and nvr["vendor"] == "hikvision":
+    if (cam_host and nvr["vendor"] == "hikvision"
+            and _v._cam_reachable_from_nvr_lan(nvr["host"], cam_host)):
         cam_user = (ch.get("camera_user") or ch["user"]).strip() or ch["user"]
         cam_pw = ch.get("camera_password") or ch["password"]
         cam_nvr = {**nvr, "host": cam_host, "user": cam_user, "password": cam_pw}

@@ -109,17 +109,45 @@ def _hik_snapshot_bytes(nvr: dict, channel: int, timeout: float) -> bytes:
 # ============================================================================
 # RTSP URLs
 # ============================================================================
+def _is_private_ipv4(host: str) -> bool:
+    """True nếu host là RFC1918 IP (10/8, 172.16-31, 192.168/16) hoặc tên
+    local (.local, localhost). False cho DDNS, public IP, public hostname."""
+    import ipaddress
+    h = host.strip().lower()
+    if h in ("localhost", "127.0.0.1", "::1") or h.endswith(".local"):
+        return True
+    try:
+        return ipaddress.ip_address(h).is_private
+    except Exception:
+        return False  # tên DDNS/hostname → mặc định không private
+
+
+def _cam_reachable_from_nvr_lan(nvr_host: str, cam_host: str) -> bool:
+    """Chỉ dùng cam direct khi: (a) nvr_host và cam_host cùng LAN /24, HOẶC
+    (b) nvr_host là private IP (cùng LAN hạ tầng). Nếu nvr_host là DDNS/
+    public → cam LAN private không reach được → fallback qua NVR."""
+    if not cam_host:
+        return False
+    nvr_private = _is_private_ipv4(nvr_host)
+    cam_private = _is_private_ipv4(cam_host)
+    # Trường hợp phổ biến: NVR DDNS (public) → cam LAN → KHÔNG direct
+    if cam_private and not nvr_private:
+        return False
+    return True
+
+
 def rtsp_live(nvr: dict, channel: int, subtype: int = 0) -> str:
-    """RTSP live URL. Hik: nếu nvr dict có 'camera_host' (IP riêng của cam),
-    stream TRỰC TIẾP từ cam qua /Streaming/Channels/101 — bypass NVR
-    transmux (fix bug PPS 0 trên firmware mới; nhanh hơn, 1-cam-1-stream).
-    'camera_user'/'camera_password' override cred nếu cam có cred riêng
-    (cam thường có pass khác NVR). Dahua: luôn qua NVR."""
+    """RTSP live URL. Hik: nếu nvr dict có 'camera_host' (IP riêng của cam)
+    VÀ cam reachable từ context hiện tại (cùng LAN), stream TRỰC TIẾP từ
+    cam qua /Streaming/Channels/101 — bypass NVR transmux (fix bug PPS 0
+    trên firmware cũ; nhanh hơn, 1-cam-1-stream).
+    NVR DDNS/public + cam LAN private → tự fallback qua NVR (cam không
+    reach được từ internet). Dahua: luôn qua NVR."""
     port = nvr.get("rtsp_port", 554)
     host = nvr["host"]
     if vendor_of(nvr) == "hikvision":
         cam_host = (nvr.get("camera_host") or "").strip()
-        if cam_host:
+        if cam_host and _cam_reachable_from_nvr_lan(host, cam_host):
             # Direct cam: channel luôn = 1 từ góc nhìn cam riêng lẻ.
             # Dùng cred của cam nếu có, else dùng cred NVR (thường cam Hik
             # trong 1 cụm NVR có cùng cred 'admin', nhưng cài đặt lẻ có
